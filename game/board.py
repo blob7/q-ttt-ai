@@ -50,8 +50,15 @@ class TicTacToe9x9:
         self.current_player *= -1
         return True
 
-    def check_winner(self):
-        """Returns 1 if X wins, -1 if O wins, 0 if draw, None if ongoing."""
+    def check_winner(self, return_cells=False):
+        """Returns:
+        - 1 if X wins
+        - -1 if O wins
+        - 0 if draw
+        - None if ongoing
+
+        If return_cells=True, also returns the list of winning cell coordinates.
+        """
         b = self.board
         size = self.SIZE
 
@@ -61,13 +68,13 @@ class TicTacToe9x9:
                     continue
                 player = b[r, c]
                 for dr, dc in [(1, 0), (0, 1), (1, 1), (1, -1)]:
+                    cells = [(r + i*dr, c + i*dc) for i in range(3)]
                     if all(
-                        0 <= r + i*dr < size and 0 <= c + i*dc < size and
-                        b[r + i*dr, c + i*dc] == player
-                        for i in range(3)
+                        0 <= rr < size and 0 <= cc < size and b[rr, cc] == player
+                        for rr, cc in cells
                     ):
-                        return player
+                        return (player, cells) if return_cells else player
 
         if not np.any(b == 0):
-            return 0  # draw
-        return None  # ongoing
+            return (0, None) if return_cells else 0
+        return (None, None) if return_cells else None

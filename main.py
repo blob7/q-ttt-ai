@@ -16,7 +16,6 @@ def main():
             gui = TicTacToeGUI(mode=GameMode.PLAYER_V_PLAYER)
         case "3":
             gui = TicTacToeGUI(mode=GameMode.BOT_V_BOT, bot1=random_bot, bot2=random_bot)
-            return
         case "4":
             print("Training mode not implemented yet")
             return
