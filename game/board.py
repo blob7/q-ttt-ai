@@ -42,7 +42,7 @@ class TicTacToe9x9:
 
         return list(valid)
 
-    def make_move(self, row, col):
+    def make_move(self, row: int, col: int):
         if (row, col) not in self.get_valid_moves():
             return False  # invalid move
         self.board[row, col] = self.current_player
@@ -50,7 +50,7 @@ class TicTacToe9x9:
         self.current_player *= -1
         return True
 
-    def check_winner(self, return_cells=False):
+    def check_winner(self, return_cells: bool = False):
         """Returns:
         - 1 if X wins
         - -1 if O wins
@@ -78,3 +78,4 @@ class TicTacToe9x9:
         if not np.any(b == 0):
             return (0, None) if return_cells else 0
         return (None, None) if return_cells else None
+

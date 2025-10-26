@@ -25,7 +25,7 @@ class BoardDrawer:
         self._draw_grid()
         self._draw_symbols()
 
-        winner, winning_cells = self.env.game.check_winner(return_cells=True)
+        winner, winning_cells = self.env.check_winner(return_cells=True)
 
         if winner and winning_cells:
             self._highlight_winner(winner, winning_cells)

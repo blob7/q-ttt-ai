@@ -35,7 +35,7 @@ class GameController:
         self.bot_speed = int(val)
 
     def on_click(self, event):
-        if self.mode == GameMode.BOT_V_BOT or self.env.game.check_winner():
+        if self.mode == GameMode.BOT_V_BOT or self.env.check_winner():
             return
 
         row, col = event.y // 50, event.x // 50
@@ -46,7 +46,7 @@ class GameController:
         self.drawer.draw_board()
         self.update_status()
 
-        if self.mode == GameMode.PLAYER_V_BOT and not self.env.game.check_winner():
+        if self.mode == GameMode.PLAYER_V_BOT and not self.env.check_winner():
             self.root.after(self.bot_speed, self._bot_turn)
 
     def _bot_turn(self):
@@ -63,7 +63,7 @@ class GameController:
         self.root.after(self.bot_speed, self.run_bot_vs_bot)
 
     def run_bot_vs_bot(self):
-        if self.env.game.check_winner():
+        if self.env.check_winner():
             self.update_status()
             return
 
@@ -76,11 +76,11 @@ class GameController:
         self.drawer.draw_board()
         self.update_status()
 
-        if not self.env.game.check_winner():
+        if not self.env.check_winner():
             self.root.after(self.bot_speed, self.run_bot_vs_bot)
 
     def update_status(self):
-        winner = self.env.game.check_winner()
+        winner = self.env.check_winner()
         if winner == 1:
             self.status.config(text="Player X wins!")
         elif winner == -1:
