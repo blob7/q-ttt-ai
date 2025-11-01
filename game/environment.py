@@ -92,47 +92,13 @@ class GameEnv:
             raise ValueError("player must be 1 or -1")
         self.controllers[player] = controller
 
-    def request_current_move(self):
-        """If a controller is registered for the current player, call it to
-        get a move and apply it via step(). Returns the (state, reward,
-        done, winner) tuple returned by step() or None if no controller.
-        """
-        ctrl = self.controllers.get(self.current_player)
-        # Debug: surface which controller is being asked
-        try:
-            print(f"[Env] request_current_move: current_player={self.current_player}, controller={ctrl}")
-        except Exception:
-            pass
-        if not ctrl:
-            try:
-                print("[Env] no controller registered for current player")
-            except Exception:
-                pass
-            return None
-        move = None
-        try:
-            move = ctrl(self)
-        except Exception as e:
-            # Print and re-raise to make debugging visible during runs
-            try:
-                print(f"[Env] controller raised exception: {e}")
-            except Exception:
-                pass
-            raise
-        # Controller may return None to indicate "no move available yet"
-        # (e.g. human controller waiting for user input). In that case we
-        # must not call step() — return None so callers know to wait.
-        if move is None:
-            try:
-                print("[Env] controller returned None (waiting/human)")
-            except Exception:
-                pass
-            return None
-        try:
-            print(f"[Env] controller returned move={move}")
-        except Exception:
-            pass
-        return self.step(move)
+    def get_controller_for_player(self, player: int):
+        """Return the registered controller callable for `player` or None."""
+        return self.controllers.get(player)
+
+    def get_controller_for_current_player(self):
+        """Return the registered controller callable for the current player."""
+        return self.get_controller_for_player(self.current_player)
 
     def render(self):
         """Prints the current board for debugging."""

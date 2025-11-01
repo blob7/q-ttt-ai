@@ -26,7 +26,15 @@ class BoardDrawer(tk.Frame):
         self.cells: int = cells
 
         # Create internal canvas and pack it so the view can grid this Frame
-        self.canvas = tk.Canvas(self, width=self.cells * self.cell_size, height=self.cells * self.cell_size)
+        # Add a small internal inset so lines and borders are not clipped at
+        # the canvas edges. `offset` is applied to all drawing coordinates.
+        self.offset = 2
+        self.canvas = tk.Canvas(
+            self,
+            width=self.cells * self.cell_size + self.offset * 2,
+            height=self.cells * self.cell_size + self.offset * 2,
+            highlightthickness=0,
+        )
         self.canvas.pack(fill="both", expand=True)
 
     def draw_board(self):
@@ -43,9 +51,22 @@ class BoardDrawer(tk.Frame):
                 self._highlight_cell(r, c)
 
     def _draw_grid(self):
+        size_px = self.cells * self.cell_size
+        # Draw grid lines inset by `offset` so they are fully visible.
         for i in range(self.cells + 1):
-            self.canvas.create_line(0, i * self.cell_size, self.cells * self.cell_size, i * self.cell_size, fill=GRID_COLOR)
-            self.canvas.create_line(i * self.cell_size, 0, i * self.cell_size, self.cells * self.cell_size, fill=GRID_COLOR)
+            y = self.offset + i * self.cell_size
+            x = self.offset + i * self.cell_size
+            self.canvas.create_line(self.offset, y, self.offset + size_px, y, fill=GRID_COLOR)
+            self.canvas.create_line(x, self.offset, x, self.offset + size_px, fill=GRID_COLOR)
+        # Outer border (inset) so the top/left edges are not clipped.
+        try:
+            self.canvas.create_rectangle(
+                self.offset, self.offset,
+                self.offset + size_px, self.offset + size_px,
+                outline=GRID_COLOR, width=2
+            )
+        except Exception:
+            pass
 
     def _draw_symbols(self):
         board = self.env.get_board()
@@ -57,10 +78,10 @@ class BoardDrawer(tk.Frame):
         """Convert canvas pixel coordinates to (row, col). Returns None if
         the coordinates are outside the board bounds.
         """
-        if x < 0 or y < 0:
+        if x < self.offset or y < self.offset:
             return None
-        col = int(x) // self.cell_size
-        row = int(y) // self.cell_size
+        col = (int(x) - self.offset) // self.cell_size
+        row = (int(y) - self.offset) // self.cell_size
         if row < 0 or row >= self.cells or col < 0 or col >= self.cells:
             return None
         return row, col
@@ -70,22 +91,29 @@ class BoardDrawer(tk.Frame):
             return
         text = "X" if val == 1 else "O"
         color = BoardColor.X_TEXT.value if val == 1 else BoardColor.O_TEXT.value
-        x, y = c * self.cell_size + self.cell_size / 2, r * self.cell_size + self.cell_size / 2
+        x = self.offset + c * self.cell_size + self.cell_size / 2
+        y = self.offset + r * self.cell_size + self.cell_size / 2
         self.canvas.create_text(x, y, text=text, fill=color, font=("Arial", 24))
 
     def _highlight_cell(self, r, c):
+        x0 = self.offset + c * self.cell_size
+        y0 = self.offset + r * self.cell_size
+        x1 = x0 + self.cell_size
+        y1 = y0 + self.cell_size
         self.canvas.create_rectangle(
-            c * self.cell_size, r * self.cell_size,
-            c * self.cell_size + self.cell_size, r * self.cell_size + self.cell_size,
+            x0, y0, x1, y1,
             fill=BoardColor.VALID_MOVE_BACKGROUND.value, width=3
         )
 
     def _highlight_winner(self, winner, winning_cells):
         color = BoardColor.X_WIN_BACKGROUND.value if winner == 1 else BoardColor.O_WIN_BACKGROUND.value
         for r, c in winning_cells:
+            x0 = self.offset + c * self.cell_size
+            y0 = self.offset + r * self.cell_size
+            x1 = x0 + self.cell_size
+            y1 = y0 + self.cell_size
             self.canvas.create_rectangle(
-                c * self.cell_size, r * self.cell_size,
-                c * self.cell_size + self.cell_size, r * self.cell_size + self.cell_size,
+                x0, y0, x1, y1,
                 fill=color, stipple="gray25", width=0
             )
 

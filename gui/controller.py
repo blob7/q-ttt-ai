@@ -383,12 +383,13 @@ class GameController:
     def _env_bot_play(self, autoplay: bool = False) -> None:
         if self.env.check_winner():
             return
-        res = self.env.request_current_move()
-        if res is None:
+        # Delegate to the GameLoop step_once which now handles controller
+        # invocation and env.step(). This keeps orchestration out of GameEnv.
+        if self.loop is None:
             return
+        done = self.loop.step_once()
         if self.view is not None:
             self.view.refresh_ui()
-        done = res[2]
         if done:
             if self.mode == GameMode.BOT_V_BOT and self.view is not None:
                 self.view.set_play_button_state("normal")

@@ -22,7 +22,7 @@ class TicTacToeGUI:
         # history widths and a small margin.
         board_px = 9 * 50
         history_px = 200
-        margin = 80
+        margin = 220
         init_w = board_px + history_px + margin
         init_h = max(9 * 50 + 120, 520)
         try:
@@ -34,7 +34,8 @@ class TicTacToeGUI:
         self.drawer = BoardDrawer(self.root, self.env, cells=9, cell_size=50)
         # place the drawer Frame in the layout (only in column 0 so the
         # move history panel can occupy column 1 without overlap)
-        self.drawer.grid(row=0, column=0, columnspan=1, sticky="nsew")
+        # Add a small padding so the board doesn't touch the window edges.
+        self.drawer.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=6, pady=6)
 
         # Configure root layout weights (UI concern kept in the View)
         self.root.grid_rowconfigure(0, weight=1)

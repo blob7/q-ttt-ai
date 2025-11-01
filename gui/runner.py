@@ -66,11 +66,29 @@ class GameLoop:
             done = (self.env.current_history_index == len(self.env.history) - 1)
             return bool(done)
 
-        res = self.env.request_current_move()
-        # If no controller (e.g. human controller with empty queue), do nothing
-        if res is None:
+        # Non-viewing mode: ask the registered controller for the
+        # current player to produce a move, then apply it via env.step().
+        ctrl = None
+        try:
+            ctrl = self.env.get_controller_for_current_player()
+        except Exception:
+            ctrl = None
+        if not ctrl:
+            # No controller registered (e.g. human waiting for input)
             return False
-
+        try:
+            move = ctrl(self.env)
+        except Exception as e:
+            try:
+                print(f"[GameLoop] controller raised exception: {e}")
+            except Exception:
+                pass
+            raise
+        # Controller may return None to indicate "waiting" (human input)
+        if move is None:
+            return False
+        # Apply the move via the environment
+        res = self.env.step(move)
         # Update UI
         try:
             self.draw_cb()
@@ -78,7 +96,6 @@ class GameLoop:
             self.history_cb()
         except Exception:
             print("Error updating UI components after step")
-
         done = res[2]
         return bool(done)
 
@@ -120,10 +137,24 @@ class GameLoop:
             self.schedule_single(self.bot_speed)
             return False
 
-        res = self.env.request_current_move()
-        if res is None:
+        ctrl = None
+        try:
+            ctrl = self.env.get_controller_for_current_player()
+        except Exception:
+            ctrl = None
+        if not ctrl:
             return False
-
+        try:
+            move = ctrl(self.env)
+        except Exception as e:
+            try:
+                print(f"[GameLoop] controller raised exception: {e}")
+            except Exception:
+                pass
+            raise
+        if move is None:
+            return False
+        res = self.env.step(move)
         # Update UI after applying the move
         try:
             self.draw_cb()
@@ -137,14 +168,10 @@ class GameLoop:
             self.history_cb()
         except Exception:
             pass
-
         done = bool(res[2])
         if done:
             return True
-
         # Not finished: schedule the next controller step after bot_speed ms.
-        # This works for both Player-v-Bot (bot replies after delay) and
-        # Bot-v-Bot when used together with start(autoplay=True).
         self.schedule_single(self.bot_speed)
         return False
 
