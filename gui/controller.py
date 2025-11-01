@@ -1,98 +1,404 @@
 import tkinter as tk
+from typing import Callable, Optional, Tuple, Dict, List
 from gui.enums import GameMode
-from gui.components import SpeedInput, PlayButton
+from gui.components import SpeedInput
+from gui.runner import GameLoop
+from game.environment import GameEnv
+from .drawer import BoardDrawer
+# Bot controller type used by the environment: callable taking GameEnv and
+# returning an optional (row, col) move.
+BotType = Callable[[GameEnv], Optional[Tuple[int, int]]]
 
 class GameController:
-    def __init__(self, root, env, drawer, mode, bot1=None, bot2=None):
+    """Wires a View (TicTacToeGUI) to a GameEnv and registered controllers.
+    Responsibilities:
+    - Register bot/human controller callables in the GameEnv
+    - Wire view events to handlers that mutate the GameEnv
+    - Request the view refresh itself after env changes
+    The controller must NOT reach into view widget internals (canvas/labels)
+    — it uses the public view and drawer helper methods instead.
+    """
+    def __init__(
+        self,
+        root: tk.Misc,
+        env: GameEnv,
+        drawer: BoardDrawer,
+        mode: GameMode,
+        bot1: Optional[BotType] = None,
+        bot2: Optional[BotType] = None,
+    ) -> None:
         self.root = root
         self.env = env
-        self.drawer = drawer
         self.mode = mode
         self.bot1 = bot1
         self.bot2 = bot2
-        self.bot_speed = 500
-
-    def build_ui(self, canvas):
-        canvas.bind("<Button-1>", self.on_click)
-
-        self.status = tk.Label(self.root, text="Player X's turn", font=("Arial", 14))
-        self.status.grid(row=1, column=1, sticky="ew")
-
-        tk.Button(self.root, text="Reset", command=self.reset).grid(row=1, column=0, sticky="ew")
-        tk.Button(self.root, text="Quit", command=self.root.destroy).grid(row=1, column=3, sticky="ew")
-
-        # --- Speed input (for all bot modes) ---
-        if self.mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT):
-            self.speed_input = SpeedInput(self.root, default_speed=self.bot_speed, on_change=self.update_speed)
-            self.speed_input.grid(row=2, column=1, sticky="ew", pady=5)
-
-        # --- Play button (only for Bot vs Bot) ---
-        if self.mode == GameMode.BOT_V_BOT:
-            self.play_button = PlayButton(self.root, self.start_bot_vs_bot)
-            self.play_button.grid(row=1, column=2, sticky="ew")
-
-    def update_speed(self, val):
-        self.bot_speed = int(val)
-
-    def on_click(self, event):
-        if self.mode == GameMode.BOT_V_BOT or self.env.check_winner():
-            return
-
-        row, col = event.y // 50, event.x // 50
-        if (row, col) not in self.env.get_valid_moves():
-            return
-
-        self.env.step((row, col))
-        self.drawer.draw_board()
-        self.update_status()
-
-        if self.mode == GameMode.PLAYER_V_BOT and not self.env.check_winner():
-            self.root.after(self.bot_speed, self._bot_turn)
-
-    def _bot_turn(self):
+        self.bot_speed: int = 500
+        # Human move queues (player -> queued moves list)
+        self._human_move_queues: Dict[int, List[Tuple[int, int]]] = {1: [], -1: []}
+        self._human_players: set[int] = set()
+        # Register controllers in the environment. If None, register a
+        # human controller that pops from the corresponding human queue.
         if self.bot1 is None:
-            print('Error: Missing Bot')
-            return
-        move = self.bot1(self.env)
-        self.env.step(move)
-        self.drawer.draw_board()
-        self.update_status()
-
-    def start_bot_vs_bot(self):
-        self.play_button.config(state="disabled")
-        self.root.after(self.bot_speed, self.run_bot_vs_bot)
-
-    def run_bot_vs_bot(self):
-        if self.env.check_winner():
-            self.update_status()
-            return
-
-        bot = self.bot1 if self.env.game.current_player == 1 else self.bot2
-        if bot is None:
-            print('Error: Missing Bot')
-            return
-        move = bot(self.env)
-        self.env.step(move)
-        self.drawer.draw_board()
-        self.update_status()
-
-        if not self.env.check_winner():
-            self.root.after(self.bot_speed, self.run_bot_vs_bot)
-
-    def update_status(self):
-        winner = self.env.check_winner()
-        if winner == 1:
-            self.status.config(text="Player X wins!")
-        elif winner == -1:
-            self.status.config(text="Player O wins!")
-        elif winner == 0:
-            self.status.config(text="Draw!")
+            self.env.register_controller(1, lambda e, p=1: self._pop_human_move(p))
+            self._human_players.add(1)
         else:
-            turn = "X" if self.env.game.current_player == 1 else "O"
-            self.status.config(text=f"Player {turn}'s turn")
+            self.env.register_controller(1, self.bot1)
+        if self.bot2 is None:
+            self.env.register_controller(-1, lambda e, p=-1: self._pop_human_move(p))
+            self._human_players.add(-1)
+        else:
+            self.env.register_controller(-1, self.bot2)
+        # Will be set in attach_view
+        self.view = None
+        self.loop: Optional[GameLoop] = None
+        self.speed_input: Optional[SpeedInput] = None
+        # Playback flag: True when autoplay/play is active
+        self._playing = False
 
-    def reset(self):
+
+    def attach_view(self, view) -> None:
+        """Attach the TicTacToeGUI view and wire callbacks.
+        The view is responsible for layout and rendering. The controller only
+        wires events and directs the view to refresh when the env changes.
+        """
+        self.view = view
+        self.speed_input = view.speed_input
+        # Debug: print controllers and current player at attach time
+        try:
+            print(f"[Controller] attach_view: current_player={self.env.current_player}, controllers={self.env.controllers}")
+        except Exception:
+            pass
+        # Prefer the drawer-level cell binding (gives (row,col) directly).
+        # Fall back to the raw click binder if the drawer does not implement it.
+        view.drawer.bind_cell_click(self.on_cell_click)
+
+        view.move_panel.on_select_move = self.jump_to_move
+        view.refresh_history()
+        # Create GameLoop with view callbacks (view owns refresh logic)
+        self.loop = GameLoop(
+            self.root,
+            self.env,
+            self.mode,
+            self.bot_speed,
+            draw_cb=view.refresh_board,
+            status_cb=view.refresh_status,
+            history_cb=view.refresh_history,
+        )
+        # Wire buttons
+        view.reset_button.config(command=self.reset)
+        view.quit_button.config(command=self.root.destroy)
+        if self.speed_input is not None:
+            self.speed_input.on_change = self.update_speed
+        if getattr(view, "play_button", None) is not None:
+            # Wire play/pause callbacks. The PlayPauseButton will call
+            # on_play/on_pause which we set to the controller methods.
+            try:
+                # PlayPauseButton expects two callbacks: on_play and on_pause
+                view.play_button.on_play = self._on_play_pressed
+                view.play_button.on_pause = self._on_pause_pressed
+                view.play_button.set_playing(False)
+            except Exception:
+                # Fallback for older PlayButton
+                view.play_button.config(command=self.start_bot_vs_bot)
+
+        # Default playing state depends on mode:
+        # - PLAYER_V_PLAYER: allow immediate play (no play button)
+        # - PLAYER_V_BOT and BOT_V_BOT: start paused until the user presses Play
+        try:
+            if self.mode == GameMode.PLAYER_V_PLAYER:
+                self._playing = True
+            else:
+                self._playing = False
+        except Exception:
+            self._playing = False
+
+        # Ensure play button (if present) reflects initial state
+        try:
+            if getattr(self.view, "play_button", None) is not None:
+                try:
+                    self.view.play_button.set_playing(self._playing)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Wire save/load/close match buttons
+        try:
+            if getattr(self.view, "save_button", None) is not None:
+                self.view.save_button.config(command=self._on_save_button)
+            if getattr(self.view, "load_button", None) is not None:
+                self.view.load_button.config(command=self._on_load_button)
+        except Exception:
+            pass
+
+        # If the current player at startup has a controller (bot), schedule
+        # NOTE: Do not auto-start autoplay here. Autoplay is explicit via the
+        # play button. We intentionally avoid scheduling an initial bot move
+        # on attach so human-vs-bot setups don't auto-play. Immediate bot
+        # replies after a human move are handled via process_available_moves.
+
+
+    def update_speed(self, val: int) -> None:
+        self.bot_speed = int(val)
+        if self.loop is not None:
+            self.loop.bot_speed = self.bot_speed
+
+
+    # --- Play / Pause control ---
+    def _on_play_pressed(self) -> None:
+        """Callback when Play is pressed on the UI control."""
+        self.play()
+
+    def _on_pause_pressed(self) -> None:
+        """Callback when Pause is pressed on the UI control."""
+        self.pause()
+
+    def play(self) -> None:
+        """Start playback/autoplay. For BOT_V_BOT this is continuous; for
+        PLAYER_V_BOT this starts scheduling bot responses when it's the
+        bot's turn (human turns still wait for clicks).
+        """
+        if self._playing:
+            return
+        self._playing = True
+        if self.view is not None and getattr(self.view, "play_button", None) is not None:
+            try:
+                self.view.play_button.set_playing(True)
+            except Exception:
+                pass
+
+        if self.loop is None:
+            return
+
+        if self.mode == GameMode.BOT_V_BOT:
+            # Continuous autoplay
+            self.loop.start(autoplay=True)
+        elif self.mode == GameMode.PLAYER_V_BOT:
+            # Schedule a single bot step; process_available_moves will
+            # chain schedule_single calls while the bot has moves.
+            self.loop.schedule_single(self.bot_speed)
+        elif self.mode == GameMode.VIEW_MATCH:
+            # Start viewing playback: advance through recorded moves.
+            self.loop.start(autoplay=True)
+
+    def stop_view_match(self) -> None:
+        """Exit view-match mode and restore the previous environment."""
+        if not getattr(self, "_viewing_match", False):
+            return
+        try:
+            # Restore env references
+            old = getattr(self, "_saved_env", None)
+            if old is not None:
+                self.env = old
+                if self.view is not None:
+                    try:
+                        self.view.env = old
+                    except Exception:
+                        pass
+                    try:
+                        self.view.drawer.env = old
+                    except Exception:
+                        pass
+                if self.loop is not None:
+                    self.loop.env = old
+        except Exception:
+            pass
+        self._viewing_match = False
+        # Refresh UI to reflect restored env
+        if self.view is not None:
+            self.view.refresh_ui()
+
+    def pause(self) -> None:
+        """Stop playback/autoplay. Cancels any scheduled callbacks."""
+        if not self._playing:
+            return
+        self._playing = False
+        if self.loop is not None:
+            self.loop.stop()
+        if self.view is not None and getattr(self.view, "play_button", None) is not None:
+            try:
+                self.view.play_button.set_playing(False)
+            except Exception:
+                pass
+
+    # UI helper glue: file dialogs + delegating IO to env
+    def _on_save_button(self) -> None:
+        try:
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+            if not path:
+                return
+            # Delegate actual export to env
+            try:
+                self.env.export_history(path)
+            except Exception as e:
+                print(f"[Controller] env.export_history failed: {e}")
+        except Exception as e:
+            print(f"[Controller] save dialog failed: {e}")
+
+    def _on_load_button(self) -> None:
+        try:
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+            if not path:
+                return
+            # Ask env to load a viewing env from file
+            try:
+                temp_env = GameEnv.load_from_file(path)
+            except Exception as e:
+                print(f"[Controller] GameEnv.load_from_file failed: {e}")
+                return
+
+            # Swap env/view to the loaded viewing env (preserve old env)
+            self._saved_env = self.env
+            self.env = temp_env
+            if self.view is not None:
+                try:
+                    self.view.env = temp_env
+                except Exception:
+                    pass
+                try:
+                    self.view.drawer.env = temp_env
+                except Exception:
+                    pass
+            # Ensure the move history panel points to the loaded env so it
+            # can display the replayed moves immediately.
+            try:
+                if self.view is not None and getattr(self.view, "move_panel", None) is not None:
+                    self.view.move_panel.env = temp_env
+            except Exception:
+                pass
+            if self.loop is not None:
+                self.loop.env = temp_env
+
+            # Enter viewing mode and pause playback
+            self._viewing_match = True
+            try:
+                self.pause()
+            except Exception:
+                pass
+            if self.view is not None:
+                self.view.refresh_ui()
+        except Exception as e:
+            print(f"[Controller] load dialog failed: {e}")
+
+            
+    def start_bot_vs_bot(self) -> None:
+        if self.view is not None:
+            self.view.set_play_button_state("disabled")
+        if self.loop is not None:
+            self.loop.start(autoplay=True)
+
+
+    def _current_bot(self, env: GameEnv) -> Optional[BotType]:
+        if env.current_player == 1 and self.bot1:
+            return self.bot1
+        if env.current_player == -1 and self.bot2:
+            return self.bot2
+        return None
+    
+
+    def on_cell_click(self, row: int, col: int) -> None:
+        """Handle a click expressed as a (row, col) cell coordinate."""
+        print(f"on_cell_click called with ({row}, {col})")
+        # Ignore clicks while paused — clicking should not mutate turn
+        # order when playback is paused.
+        if not self._playing:
+            print("Ignoring click: playback paused")
+            return
+        if self.mode == GameMode.BOT_V_BOT or self.env.check_winner():
+            print("Ignoring click: BOT_V_BOT mode or game over")
+            return
+        if (row, col) not in self.env.get_valid_moves():
+            print(f"Ignoring click: Invalid move at ({row}, {col})")
+            return
+        print(f"BEFORE - CUURENT Cell clicked at ({row}, {col})")
+        current = self.env.current_player
+        if current not in self._human_players:
+            print("Ignoring click: Current player is not human")
+            return
+        print(f"BEFORE APPEND - Cell clicked at ({row}, {col}) by player {current}")
+        self._human_move_queues[current].append((row, col))
+        print(f"AFTER APPEND - Cell clicked at ({row}, {col}) by player {current}")
+        print(self._human_move_queues)
+        print(self.loop is None)
+        # Only trigger bot processing if playback is active.
+        if self.loop is not None and self._playing:
+            print(f"Processing available moves after click at ({row}, {col})")
+            self.loop.process_available_moves()
+
+
+    def reset(self) -> None:
         self.env.reset()
-        self.drawer.draw_board()
-        self.status.config(text="Player X's turn")
-        self.play_button.config(state="normal")
+        if self.view is not None:
+            # For modes with autoplay (bots) pause on reset; keep PvP
+            # interactive without requiring Play.
+            try:
+                if self.mode != GameMode.PLAYER_V_PLAYER:
+                    self.pause()
+            except Exception:
+                pass
+            # Clear any queued human moves to avoid out-of-order execution
+            try:
+                self._human_move_queues = {1: [], -1: []}
+            except Exception:
+                pass
+            self.view.refresh_ui(set_play_state="normal")
+
+            
+    def jump_to_move(self, index: int) -> None:
+        self.env.jump_to_move(index)
+        if self.view is not None:
+            # Jumping to history should pause playback for bot modes; keep
+            # PvP interactive.
+            try:
+                if self.mode != GameMode.PLAYER_V_PLAYER:
+                    self.pause()
+            except Exception:
+                pass
+            try:
+                # Clear queued moves when jumping in history
+                self._human_move_queues = {1: [], -1: []}
+            except Exception:
+                pass
+            self.view.refresh_ui()
+
+                        
+    def make_move(self, move_fn: Optional[BotType] = None, autoplay: bool = False) -> None:
+        if move_fn:
+            move = move_fn(self.env)
+            if move is None:
+                return
+            self.env.step(move)
+        if self.view is not None:
+            self.view.refresh_ui()
+        if self.env.check_winner():
+            if self.mode == GameMode.BOT_V_BOT and self.view is not None:
+                self.view.set_play_button_state("normal")
+            return
+        if autoplay and self.mode == GameMode.BOT_V_BOT and self.loop is not None:
+            self.loop.start(autoplay=True)
+
+
+    def _env_bot_play(self, autoplay: bool = False) -> None:
+        if self.env.check_winner():
+            return
+        res = self.env.request_current_move()
+        if res is None:
+            return
+        if self.view is not None:
+            self.view.refresh_ui()
+        done = res[2]
+        if done:
+            if self.mode == GameMode.BOT_V_BOT and self.view is not None:
+                self.view.set_play_button_state("normal")
+            return
+        if autoplay and self.mode == GameMode.BOT_V_BOT and self.loop is not None:
+            self.loop.schedule_single(self.bot_speed)
+
+
+    def _pop_human_move(self, player: int) -> Optional[Tuple[int, int]]:
+        q = self._human_move_queues.get(player)
+        if not q:
+            return None
+        return q.pop(0)

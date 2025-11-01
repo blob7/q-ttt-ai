@@ -20,8 +20,7 @@ def main():
             print("Training mode not implemented yet")
             return
         case "5":
-            print("View Match not implemented yet")
-            return
+            gui = TicTacToeGUI(mode=GameMode.VIEW_MATCH)
         case _:
             print("Invalid choice")
             return
@@ -30,6 +29,7 @@ def main():
 
 
 def random_bot(env):
+    print("Random bot is thinking...")
     moves = env.get_valid_moves()
     return random.choice(moves)
 
