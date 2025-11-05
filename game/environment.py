@@ -1,6 +1,8 @@
 # game/environment.py
+from typing import Any, Callable, Optional
 from .board import TicTacToe9x9
 from .utils import print_board
+from game.board import PlayerPiece
 
 
 class GameEnv:
@@ -15,8 +17,8 @@ class GameEnv:
         self.current_history_index = -1
         # Optional controller callables for each player. These can be set by
         # the GUI or higher-level code to allow the environment to request a
-        # move for the current player (e.g. bots). Keys are 1 and -1.
-        self.controllers = {1: None, -1: None}
+        # move for the current player (e.g. bots). Keys are PlayerPiece.X and PlayerPiece.O.
+        self.controllers: dict[int, Optional[Callable]] = {PlayerPiece.X.value: None, PlayerPiece.O.value: None}
 
     def reset(self):
         self.game.reset()
@@ -37,14 +39,14 @@ class GameEnv:
         """Convenience property to get the current player (1 or -1)."""
         return self.game.current_player
 
-    def step(self, action: tuple[int, int]):
+    def step(self, action: tuple[int, int]) -> tuple[Any, bool, int | Any]:
         """Perform one move, record it, and return (state, reward, done, winner)."""
         row, col = action
         valid = self.game.make_move(row, col)
 
         if not valid:
             # Invalid move: penalize
-            return self.get_state(), -1, True, None
+            return self.get_state(), True, None
 
         # Record move in history.
         # If we had previously jumped back in history (current_history_index
@@ -68,28 +70,19 @@ class GameEnv:
         winner = self.check_winner()
         done = winner is not None
 
-        if winner == self.game.current_player * -1:
-            reward = 1  # last move wins
-        elif winner == 0:
-            reward = 0.5  # draw
-        elif not done:
-            reward = 0
-        else:
-            reward = -1  # lost (rare)
-
-        return self.get_state(), reward, done, winner
+        return self.get_state(), done, winner
 
     def get_valid_moves(self):
         return self.game.get_valid_moves()
 
-    def register_controller(self, player: int, controller):
+    def register_controller(self, player: int, controller: Callable):
         """Register a controller callable for a player (1 or -1).
 
         The controller should be a callable taking one argument (the env)
         and returning a move tuple (row, col). Use None to unregister.
         """
-        if player not in (1, -1):
-            raise ValueError("player must be 1 or -1")
+        if player not in (PlayerPiece.X.value, PlayerPiece.O.value):
+            raise ValueError("player must be PlayerPiece.X.value or PlayerPiece.O.value")
         self.controllers[player] = controller
 
     def get_controller_for_player(self, player: int):
@@ -157,11 +150,12 @@ class GameEnv:
             mv = tuple(entry.get("move"))
             env.step(mv)
 
-        # Reset board to initial state for viewing; keep history populated
+        # Reset board to initial empty state for viewing but keep the
+        # populated history so the UI can step through the recorded moves.
+        # Calling env.reset() would clear the history, so reset only the
+        # underlying game board and track index.
         try:
-            env.game.board = env.game.board * 0
-            env.game.current_player = 1
-            env.game.last_move = None
+            env.game.reset()
             env.current_history_index = -1
         except Exception:
             pass

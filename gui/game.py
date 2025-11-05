@@ -5,6 +5,7 @@ from gui.drawer import BoardDrawer
 from gui.controller import GameController
 from gui.enums import GameMode
 from game.environment import GameEnv
+from game.board import Winner, PlayerPiece
 from gui.components import MoveHistoryPanel
 
 
@@ -104,14 +105,14 @@ class TicTacToeGUI:
     def refresh_status(self):
         """Update the status label from the env state."""
         winner = self.env.check_winner()
-        if winner == 1:
+        if winner == Winner.X.value:
             text = "Player X wins!"
-        elif winner == -1:
+        elif winner == Winner.O.value:
             text = "Player O wins!"
-        elif winner == 0:
+        elif winner == Winner.DRAW.value:
             text = "Draw!"
         else:
-            turn = "X" if self.env.current_player == 1 else "O"
+            turn = "X" if self.env.current_player == PlayerPiece.X.value else "O"
             text = f"Player {turn}'s turn"
         self.status_label.config(text=text)
 

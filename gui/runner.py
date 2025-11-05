@@ -1,4 +1,5 @@
 from typing import Optional
+from game.environment import GameEnv
 from gui.enums import GameMode
 
 
@@ -9,7 +10,7 @@ class GameLoop:
 
     This keeps scheduling and continuation logic out of the GUI view code.
     """
-    def __init__(self, root, env, mode, bot_speed: int, draw_cb, status_cb, history_cb):
+    def __init__(self, root, env: GameEnv, mode, bot_speed: int, draw_cb, status_cb, history_cb):
         self.root = root
         self.env = env
         self.mode = mode
@@ -77,7 +78,12 @@ class GameLoop:
             # No controller registered (e.g. human waiting for input)
             return False
         try:
-            move = ctrl(self.env)
+            # Controllers in this project expect (state, valid_moves)
+            # for bots and (env) for simple human lambdas. Provide the
+            # (state, valid_moves) form and allow controllers to return
+            # a list or tuple; normalize lists/arrays to tuple before
+            # passing to env.step().
+            move = ctrl(self.env.get_state(), self.env.get_valid_moves())
         except Exception as e:
             try:
                 print(f"[GameLoop] controller raised exception: {e}")
@@ -87,6 +93,13 @@ class GameLoop:
         # Controller may return None to indicate "waiting" (human input)
         if move is None:
             return False
+        # Normalize move to an immutable tuple so later code can use it as
+        # a dict key (agents/Q-table) without raising 'unhashable type: list'.
+        try:
+            if isinstance(move, list):
+                move = tuple(move)
+        except Exception:
+            pass
         # Apply the move via the environment
         res = self.env.step(move)
         # Update UI
@@ -145,29 +158,26 @@ class GameLoop:
         if not ctrl:
             return False
         try:
-            move = ctrl(self.env)
+            move = ctrl(self.env.get_state(), self.env.get_valid_moves())
         except Exception as e:
-            try:
-                print(f"[GameLoop] controller raised exception: {e}")
-            except Exception:
-                pass
+            print(f"[GameLoop] controller raised exception: {e}")
             raise
+        # Normalize move to tuple to avoid unhashable-list issues later
+        try:
+            if isinstance(move, list):
+                move = tuple(move)
+        except Exception:
+            pass
         if move is None:
             return False
         res = self.env.step(move)
         # Update UI after applying the move
         try:
             self.draw_cb()
-        except Exception:
-            pass
-        try:
             self.status_cb()
-        except Exception:
-            pass
-        try:
             self.history_cb()
         except Exception:
-            pass
+            print("Error updating UI components after step")
         done = bool(res[2])
         if done:
             return True

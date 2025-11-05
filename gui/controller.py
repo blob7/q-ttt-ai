@@ -39,12 +39,12 @@ class GameController:
         # Register controllers in the environment. If None, register a
         # human controller that pops from the corresponding human queue.
         if self.bot1 is None:
-            self.env.register_controller(1, lambda e, p=1: self._pop_human_move(p))
+            self.env.register_controller(1, lambda e, _, p=1: self._pop_human_move(p))
             self._human_players.add(1)
         else:
             self.env.register_controller(1, self.bot1)
         if self.bot2 is None:
-            self.env.register_controller(-1, lambda e, p=-1: self._pop_human_move(p))
+            self.env.register_controller(-1, lambda e, _, p=-1: self._pop_human_move(p))
             self._human_players.add(-1)
         else:
             self.env.register_controller(-1, self.bot2)
@@ -63,11 +63,6 @@ class GameController:
         """
         self.view = view
         self.speed_input = view.speed_input
-        # Debug: print controllers and current player at attach time
-        try:
-            print(f"[Controller] attach_view: current_player={self.env.current_player}, controllers={self.env.controllers}")
-        except Exception:
-            pass
         # Prefer the drawer-level cell binding (gives (row,col) directly).
         # Fall back to the raw click binder if the drawer does not implement it.
         view.drawer.bind_cell_click(self.on_cell_click)
@@ -300,31 +295,20 @@ class GameController:
 
     def on_cell_click(self, row: int, col: int) -> None:
         """Handle a click expressed as a (row, col) cell coordinate."""
-        print(f"on_cell_click called with ({row}, {col})")
         # Ignore clicks while paused — clicking should not mutate turn
         # order when playback is paused.
         if not self._playing:
-            print("Ignoring click: playback paused")
             return
         if self.mode == GameMode.BOT_V_BOT or self.env.check_winner():
-            print("Ignoring click: BOT_V_BOT mode or game over")
             return
         if (row, col) not in self.env.get_valid_moves():
-            print(f"Ignoring click: Invalid move at ({row}, {col})")
             return
-        print(f"BEFORE - CUURENT Cell clicked at ({row}, {col})")
         current = self.env.current_player
         if current not in self._human_players:
-            print("Ignoring click: Current player is not human")
             return
-        print(f"BEFORE APPEND - Cell clicked at ({row}, {col}) by player {current}")
         self._human_move_queues[current].append((row, col))
-        print(f"AFTER APPEND - Cell clicked at ({row}, {col}) by player {current}")
-        print(self._human_move_queues)
-        print(self.loop is None)
         # Only trigger bot processing if playback is active.
         if self.loop is not None and self._playing:
-            print(f"Processing available moves after click at ({row}, {col})")
             self.loop.process_available_moves()
 
 
