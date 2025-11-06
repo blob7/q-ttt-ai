@@ -3,6 +3,8 @@ from collections import defaultdict
 import random
 import pickle
 from pathlib import Path
+import numpy as np
+from game.environment import GameEnv
 
 class BaseAgent(ABC):   
     def __init__(self, role = None, learning_rate: float = 0.1, discount_factor: float = 0.9, epsilon: float = 0.2):
@@ -22,20 +24,16 @@ class BaseAgent(ABC):
         pass
 
     # --- Core Q-learning update ---
-    def update_q_value(self, last_state, action: tuple[int, int] | None, new_state, reward: float, done: bool):
+    def update_q_value(self, last_state, action: tuple[int, int], new_state, reward: float, done: bool):
         """
         Update Q-value for the last_state/action pair based on reward and new_state.
         """
         # Convert numpy arrays or other mutable types to tuples for dict keys
         last_state_h = self._make_hashable(last_state)
         new_state_h = self._make_hashable(new_state)
-
-        board_tuple, _ = new_state_h 
         # Initialize Q-values for all empty positions in the new state
-        for i, row in enumerate(board_tuple):
-            for j, cell in enumerate(row):
-                if cell == 0 and (i, j) not in self.q_values[new_state_h]:
-                    self.q_values[new_state_h][(i, j)] = 0.0
+        if action not in self.q_values[last_state_h]:
+            self.q_values[last_state_h][action] = 0.0
 
         # Compute target Q-value
         max_future_q = 0.0 if done else max(self.q_values[new_state_h].values(), default=0.0)
@@ -46,26 +44,31 @@ class BaseAgent(ABC):
 
     # --- Action selection (epsilon-greedy) ---
     def choose_action(self, state, valid_moves, learn: bool = True):
-        """
-        Select action using epsilon-greedy.
-        Converts state to hashable tuple-of-tuples.
-        """
+        """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
         state_h = self._make_hashable(state)
+        state_q = self.q_values.setdefault(state_h, defaultdict(float))  # ensure dict exists
 
-        if learn:
-            # Initialize Q-values for unseen moves
-            for move in valid_moves:
-                if move not in self.q_values[state_h]:
-                    self.q_values[state_h][move] = 0.0
-            # Epsilon-greedy choice
-            if random.random() < self.epsilon:
-                return random.choice(valid_moves)
-            return max(valid_moves, key=lambda a: self.q_values[state_h][a])
-        else:
-            for move in valid_moves:
-                if move not in self.q_values[state_h]:
-                    self.q_values[state_h][move] = 0.0
-            return max(valid_moves, key=lambda a: self.q_values[state_h][a])
+        safety_move, safe_moves = self._safety_net_choices(state, valid_moves)
+        if safety_move is not None:
+            return safety_move
+
+        eligible_moves = safe_moves if safe_moves else valid_moves
+
+        # Epsilon-greedy policy
+        if learn and random.random() < self.epsilon:
+            # Explore: random valid move
+            return random.choice(eligible_moves)
+
+        # Exploit: pick move with max Q-value (default to 0.0 if unseen)
+        best_move = None
+        best_value = float('-inf')
+        for move in eligible_moves:
+            q = state_q.get(move, 0.0)  # lazy read
+            if q > best_value:
+                best_move = move
+                best_value = q
+        # Fallback (shouldn't happen unless valid_moves empty)
+        return best_move if best_move is not None else random.choice(valid_moves)
             
     # --- Reward computation ---
     @abstractmethod
@@ -78,20 +81,25 @@ class BaseAgent(ABC):
 
     # --- Combined learning step ---
     def learn(self, last_state, action: tuple[int, int] | None, new_state, done: bool, winner):
-        reward = self.compute_reward(last_state, action, new_state, done)
+        reward = self.compute_reward(last_state, action, new_state, winner)
+        if action is None:
+            return
         self.update_q_value(last_state, action, new_state, reward, done)
 
     def _make_hashable(self, state):
-        board, player = state  # state = (board, current_player)
-        
-        # Ensure board is tuple-of-tuples of ints
-        board_tuple = tuple(
-            tuple(int(cell) for cell in row) 
-            for row in (board.tolist() if hasattr(board, "tolist") else board)
-        )
-        return (board_tuple, int(player))
+        board, player = state
 
+        # Ensure board is numpy array
+        board = np.array(board, dtype=int)
 
+        # Use canonical version to reduce symmetry
+        canonical_board = self._canonical_board(board)
+
+        # Flatten and encode to compact string
+        flat = [cell for row in canonical_board for cell in row]
+        encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
+
+        return (encoded, int(player))
 
 
     def save(self, file_path: str):
@@ -110,6 +118,7 @@ class BaseAgent(ABC):
             }, f)
         print(f"Agent saved to {path}")
 
+
     @classmethod
     def load(cls, file_path: str, role=None):
         path = Path(file_path)
@@ -124,3 +133,23 @@ class BaseAgent(ABC):
         agent.lr = data.get("lr", 0.1)
         agent.gamma = data.get("gamma", 0.9)
         return agent
+    
+    
+    def _canonical_board(self, board):
+        """
+        Returns the lexicographically smallest board among all rotations and mirror flips.
+        This ensures symmetric states share the same hash, reducing Q-table size.
+        """
+        rotations = [np.rot90(board, k) for k in range(4)]
+        mirrors = [np.fliplr(r) for r in rotations]
+        all_forms = rotations + mirrors
+        # Convert each to tuple-of-tuples for comparison
+        return min(tuple(map(tuple, b)) for b in all_forms)
+
+
+    def _safety_net_choices(self, state, valid_moves):
+        """Return forced move if present and list of moves that keep the opponent from an immediate win."""
+        board, current_player = state
+        board_arr = np.array(board, copy=True)
+        forced_move, safe_moves = GameEnv.safety_net_choices(board_arr, current_player, valid_moves)
+        return forced_move, safe_moves

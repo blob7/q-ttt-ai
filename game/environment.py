@@ -1,5 +1,6 @@
 # game/environment.py
 from typing import Any, Callable, Optional
+import numpy as np
 from .board import TicTacToe9x9
 from .utils import print_board
 from game.board import PlayerPiece
@@ -99,6 +100,48 @@ class GameEnv:
 
     def check_winner(self, return_cells=False):
         return self.game.check_winner(return_cells=return_cells)
+
+    @staticmethod
+    def safety_net_choices(board, current_player: int, valid_moves):
+        board_arr = np.array(board, copy=True)
+
+        for move in valid_moves:
+            if GameEnv.is_winning_move(board_arr, move, current_player):
+                return move, valid_moves
+
+        safe_moves = [
+            move for move in valid_moves
+            if not GameEnv.opponent_can_win_next(board_arr, move, current_player)
+        ]
+
+        return None, safe_moves
+
+    @staticmethod
+    def is_winning_move(board, move, player: int) -> bool:
+        test_board = GameEnv._simulate_move(board, move, player)
+        temp_game = TicTacToe9x9()
+        temp_game.board = test_board
+        return temp_game.check_winner() == player
+
+    @staticmethod
+    def opponent_can_win_next(board, move, player: int) -> bool:
+        test_board = GameEnv._simulate_move(board, move, player)
+        opponent = -player
+        temp_game = TicTacToe9x9()
+        temp_game.board = test_board
+        temp_game.last_move = move
+        opponent_moves = temp_game.get_valid_moves()
+        for opp_move in opponent_moves:
+            if GameEnv.is_winning_move(test_board, opp_move, opponent):
+                return True
+        return False
+
+    @staticmethod
+    def _simulate_move(board, move, player: int):
+        simulated = np.array(board, copy=True)
+        r, c = move
+        simulated[r, c] = player
+        return simulated
     
     def jump_to_move(self, index: int):
         """Set the game state to a specific move in history."""
