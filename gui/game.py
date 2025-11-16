@@ -88,7 +88,7 @@ class TicTacToeGUI:
             self.play_button.grid(row=5, column=0, sticky="ew", pady=2)
 
         # Create controller after view elements exist; controller will attach callbacks
-        self.controller = GameController(self.root, self.env, self.drawer, mode, bot1, bot2)
+        self.controller = GameController(self.root, self.env, mode, bot1, bot2)
         self.controller.attach_view(self)
 
         # Initial draw

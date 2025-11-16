@@ -53,6 +53,7 @@ class NeuralQAgent(BaseAgent):
     def name(self):
         return "NeuralQAgent"
 
+
     def choose_action(self, state, valid_moves, learn: bool = True):
         board, current_player = state
         board_arr = np.array(board, copy=True)
@@ -113,6 +114,10 @@ class NeuralQAgent(BaseAgent):
         loss = F.mse_loss(predicted_q, target_value.detach())
         loss.backward()
         self.optimizer.step()
+
+    def learn_result(self, winner, final_state):
+        # Neural agent trains incrementally per move; no episodic update needed.
+        return
 
     def _state_to_tensor(self, state) -> torch.Tensor:
         board, current_player = state

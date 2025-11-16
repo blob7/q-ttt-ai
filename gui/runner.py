@@ -83,7 +83,7 @@ class GameLoop:
             # (state, valid_moves) form and allow controllers to return
             # a list or tuple; normalize lists/arrays to tuple before
             # passing to env.step().
-            move = ctrl(self.env.get_state(), self.env.get_valid_moves())
+            move = ctrl(self.env.get_state(), self.env.get_state_hash(), self.env.get_valid_moves())
         except Exception as e:
             try:
                 print(f"[GameLoop] controller raised exception: {e}")
@@ -158,7 +158,7 @@ class GameLoop:
         if not ctrl:
             return False
         try:
-            move = ctrl(self.env.get_state(), self.env.get_valid_moves())
+            move = ctrl(self.env.get_state(), self.env.get_state_hash(), self.env.get_valid_moves())
         except Exception as e:
             print(f"[GameLoop] controller raised exception: {e}")
             raise

@@ -1,5 +1,5 @@
 # game/environment.py
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 from .board import TicTacToe9x9
 from .utils import print_board
@@ -7,10 +7,12 @@ from game.board import PlayerPiece
 
 
 class GameEnv:
-    """Environment wrapper for playing and training."""
+    """Environment wrapper for playing and training. X goes first"""
     def __init__(self):
         self.game = TicTacToe9x9()
-        self.history = []
+        self.history: List[Dict[str, Any]] = [] # list of {player: PlayerPiece.value, move: (row, col), board: np.ndarray}
+        self.state_history: List[Dict[str, Any]] = [] # list of {state: hash(board, current_player), action: (row, col)}
+        
         # index into history that represents the current state. -1 means
         # no moves have been played (history empty). When jumping back in
         # history this will be set to that index; new moves should truncate
@@ -20,16 +22,22 @@ class GameEnv:
         # the GUI or higher-level code to allow the environment to request a
         # move for the current player (e.g. bots). Keys are PlayerPiece.X and PlayerPiece.O.
         self.controllers: dict[int, Optional[Callable]] = {PlayerPiece.X.value: None, PlayerPiece.O.value: None}
+        # self._hashable_cache: dict[tuple[int, ...], tuple[str, int]] = {}
 
     def reset(self):
         self.game.reset()
         self.history = []
+        self.state_history = []
         self.current_history_index = -1
         return self.get_state()
 
     def get_state(self):
         """Return a tuple or flat version of the board (suitable for AI input)."""
         return self.game.board.copy(), self.game.current_player
+    
+    def get_state_hash(self):
+        """Return a hashable representation of the current state for use as a key in Q-tables."""
+        return self._make_hashable(self.get_state())
 
     def get_board(self):
         """Return a copy of the underlying board array (read-only from caller POV)."""
@@ -41,12 +49,13 @@ class GameEnv:
         return self.game.current_player
 
     def step(self, action: tuple[int, int]) -> tuple[Any, bool, int | Any]:
-        """Perform one move, record it, and return (state, reward, done, winner)."""
+        """Perform one move, record it, and return (state, done, winner)."""
         row, col = action
+        last_state_h = self.get_state_hash()
         valid = self.game.make_move(row, col)
 
         if not valid:
-            # Invalid move: penalize
+            print(f"Invalid move: {action} by player {self.game.current_player}")
             return self.get_state(), True, None
 
         # Record move in history.
@@ -56,6 +65,7 @@ class GameEnv:
         if self.current_history_index != len(self.history) - 1:
             # keep entries up to current_history_index (inclusive)
             self.history = self.history[: self.current_history_index + 1]
+            self.state_history = self.state_history[: self.current_history_index + 1]
 
         # `make_move` flips current_player after applying the move, so the
         # player who just moved is the negation of the current player.
@@ -65,6 +75,13 @@ class GameEnv:
             "move": (row, col),
             "board": self.game.board.copy()
         })
+
+        self.state_history.append({
+            "state": last_state_h,
+            "action": (row, col)
+        })
+
+            
         # advance current_history_index to the new last entry
         self.current_history_index = len(self.history) - 1
 
@@ -170,7 +187,7 @@ class GameEnv:
         data = []
         for entry in self.history:
             mv = entry.get("move")
-            data.append({"player": entry.get("player"), "move": [mv[0], mv[1]]})
+            data.append({"player": entry.get("player"), "move": [mv[0], mv[1]]}) # type: ignore
 
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -204,3 +221,38 @@ class GameEnv:
             pass
 
         return env
+    
+    def _canonical_board(self, board: np.ndarray) -> np.ndarray:
+        """
+        Returns the lexicographically smallest board among all rotations and flips.
+        This includes 4 rotations * (original + horizontal flip + vertical flip + both) = 16 variants.
+        """
+        board = np.array(board, dtype=int)  # ensure consistent type
+        transforms = []
+
+        # Generate rotations
+        for k in range(4):
+            rotated = np.rot90(board, k)
+            transforms.append(rotated)                  # rotation only
+            transforms.append(np.fliplr(rotated))      # horizontal flip
+            transforms.append(np.flipud(rotated))      # vertical flip
+            transforms.append(np.flipud(np.fliplr(rotated)))  # both flips
+
+        # Pick the lexicographically smallest
+        canonical = min(transforms, key=lambda b: tuple(b.flatten()))
+        return canonical
+
+
+    def _make_hashable(self, state):
+        board, player = state
+        key = (tuple(board.flatten()), player)  # include player in cache key
+
+        # if key in self._hashable_cache:
+        #     return self._hashable_cache[key]
+
+        canonical_board = self._canonical_board(board)
+        flat = [cell for row in canonical_board for cell in row]
+        encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
+        result = (encoded, int(player))
+        # self._hashable_cache[key] = result
+        return result

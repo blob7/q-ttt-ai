@@ -1,5 +1,7 @@
 import tkinter as tk
 
+from game.board import PlayerPiece
+
 class SpeedInput(tk.Frame):
     """A simple labeled text input for bot move speed (in ms)."""
     def __init__(self, parent, default_speed=500, on_change=None):
@@ -108,7 +110,7 @@ class MoveHistoryPanel(tk.Frame):
         self.current_index = current_index
 
         for i, entry in enumerate(self.env.history):
-            player = "X" if entry["player"] == 1 else "O"
+            player = "X" if entry["player"] == PlayerPiece.X.value else "O"
             move = entry["move"]
             text = f"{i+1}. {player} → {move}"
 

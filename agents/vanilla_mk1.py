@@ -21,9 +21,8 @@ class SimpleTicTacToeAgent(BaseAgent):
     def name(self) -> str:
         return "SimpleTicTacToeAgent"
 
-    def compute_reward(self, last_state, action: tuple[int, int] | None, new_state, winner) -> float:
-        # Reward terminal outcomes only; intermediate rewards handled via Q-values.
-        if winner == self.role:
+    def compute_reward(self, state, action, winner, mover) -> float:
+        if winner == mover:
             return 1.0
         if winner in (None, 0):
             return 0.0

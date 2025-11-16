@@ -3,103 +3,108 @@ from collections import defaultdict
 import random
 import pickle
 from pathlib import Path
+from typing import Optional, Tuple
 import numpy as np
+from game.board import PlayerPiece
 from game.environment import GameEnv
 
 class BaseAgent(ABC):   
-    def __init__(self, role = None, learning_rate: float = 0.1, discount_factor: float = 0.9, epsilon: float = 0.2):
+    def __init__(self, role = None, learning_rate: float = 0.01, discount_factor: float = 0.9, epsilon: float = 1.0, min_epsilon: float = 0.05, epsilon_decay: float = 0.995):
         self.role = role
         self.q_values = defaultdict(lambda: defaultdict(float))  # Q-table
         self.lr = learning_rate
         self.gamma = discount_factor
         self.epsilon = epsilon
+        self.min_epsilon = min_epsilon
+        self.epsilon_decay = epsilon_decay
+        self._episode_transitions = []  # stack
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """
-        Must be implemented by each agent.
-        Returns the name/identifier of the agent.
-        """
+        """Returns the name/identifier of the agent."""
         pass
-
-    # --- Core Q-learning update ---
-    def update_q_value(self, last_state, action: tuple[int, int], new_state, reward: float, done: bool):
-        """
-        Update Q-value for the last_state/action pair based on reward and new_state.
-        """
-        # Convert numpy arrays or other mutable types to tuples for dict keys
-        last_state_h = self._make_hashable(last_state)
-        new_state_h = self._make_hashable(new_state)
-        # Initialize Q-values for all empty positions in the new state
-        if action not in self.q_values[last_state_h]:
-            self.q_values[last_state_h][action] = 0.0
-
-        # Compute target Q-value
-        max_future_q = 0.0 if done else max(self.q_values[new_state_h].values(), default=0.0)
-        target = reward if done else reward + self.gamma * max_future_q
-
-        # Update Q-value for last state/action
-        self.q_values[last_state_h][action] += self.lr * (target - self.q_values[last_state_h][action])
 
     # --- Action selection (epsilon-greedy) ---
-    def choose_action(self, state, valid_moves, learn: bool = True):
+    def choose_action(self, state, state_hash, valid_moves, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
-        state_h = self._make_hashable(state)
-        state_q = self.q_values.setdefault(state_h, defaultdict(float))  # ensure dict exists
+        state_q = self.q_values.setdefault(state_hash, defaultdict(float))  # ensure dict exists
 
         safety_move, safe_moves = self._safety_net_choices(state, valid_moves)
+        selected_move = None
+
         if safety_move is not None:
-            return safety_move
+            selected_move = safety_move
+        else:
+            eligible_moves = safe_moves if safe_moves else valid_moves
 
-        eligible_moves = safe_moves if safe_moves else valid_moves
+            # Epsilon-greedy policy
+            if learn and random.random() < self.epsilon:
+                # Explore: random valid move
+                selected_move = random.choice(eligible_moves)
+            else:
+                # Exploit: pick move with max Q-value (default to 0.0 if unseen)
+                best_move = None
+                best_value = float('-inf')
+                for move in eligible_moves:
+                    q = state_q.get(move, 0.0)  # lazy read
+                    if q > best_value:
+                        best_move = move
+                        best_value = q
+                selected_move = best_move if best_move is not None else random.choice(valid_moves)
 
-        # Epsilon-greedy policy
-        if learn and random.random() < self.epsilon:
-            # Explore: random valid move
-            return random.choice(eligible_moves)
+        if selected_move is None and valid_moves:
+            selected_move = random.choice(valid_moves)
 
-        # Exploit: pick move with max Q-value (default to 0.0 if unseen)
-        best_move = None
-        best_value = float('-inf')
-        for move in eligible_moves:
-            q = state_q.get(move, 0.0)  # lazy read
-            if q > best_value:
-                best_move = move
-                best_value = q
-        # Fallback (shouldn't happen unless valid_moves empty)
-        return best_move if best_move is not None else random.choice(valid_moves)
-            
+        return selected_move
+                
+    def decay_epsilon(self) -> None:
+        """Decay epsilon after each episode."""
+        self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+
+
     # --- Reward computation ---
     @abstractmethod
-    def compute_reward(self, last_state, action, new_state, winner) -> float:
-        """
-        Must be implemented by each agent.
-        Determines the reward for the last action based on agent's own logic.
-        """
+    def compute_reward(self, state, action, winner: Optional[int], mover) -> float:
+        """Must be implemented by each agent.
+        Determines the reward for the last action based on agent's own logic."""
         pass
 
-    # --- Combined learning step ---
-    def learn(self, last_state, action: tuple[int, int] | None, new_state, done: bool, winner):
-        reward = self.compute_reward(last_state, action, new_state, winner)
-        if action is None:
-            return
-        self.update_q_value(last_state, action, new_state, reward, done)
 
-    def _make_hashable(self, state):
-        board, player = state
+    def learn_result(
+        self,
+        winner: Optional[int],
+        state_history: list[dict],
+        learn_from: int | tuple[int, int] = (PlayerPiece.X.value, PlayerPiece.O.value)
+    ) -> None:
+        # Normalize input to a set
+        if isinstance(learn_from, int):
+            learn_set = {learn_from}
+        else:
+            learn_set = set(learn_from)
 
-        # Ensure board is numpy array
-        board = np.array(board, dtype=int)
+        # state_history is chronological: index 0 = first move
+        total_moves = len(state_history)
 
-        # Use canonical version to reduce symmetry
-        canonical_board = self._canonical_board(board)
+        # Reverse order for reward discounting
+        for reverse_idx, transition in enumerate(reversed(state_history)):
+            real_idx = total_moves - 1 - reverse_idx
 
-        # Flatten and encode to compact string
-        flat = [cell for row in canonical_board for cell in row]
-        encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
+            # Determine which player made this move
+            if real_idx % 2 == 0:
+                mover = PlayerPiece.X.value
+            else:
+                mover = PlayerPiece.O.value
 
-        return (encoded, int(player))
+            # Skip if this move is not from the desired player(s)
+            if mover not in learn_set:
+                continue
+
+            state = transition["state"]
+            action = transition["action"]
+
+            reward = self.compute_reward(state, action, winner, mover=mover)
+            self.q_values[state][action] += reward
 
 
     def save(self, file_path: str):
@@ -135,17 +140,6 @@ class BaseAgent(ABC):
         return agent
     
     
-    def _canonical_board(self, board):
-        """
-        Returns the lexicographically smallest board among all rotations and mirror flips.
-        This ensures symmetric states share the same hash, reducing Q-table size.
-        """
-        rotations = [np.rot90(board, k) for k in range(4)]
-        mirrors = [np.fliplr(r) for r in rotations]
-        all_forms = rotations + mirrors
-        # Convert each to tuple-of-tuples for comparison
-        return min(tuple(map(tuple, b)) for b in all_forms)
-
 
     def _safety_net_choices(self, state, valid_moves):
         """Return forced move if present and list of moves that keep the opponent from an immediate win."""
@@ -153,3 +147,19 @@ class BaseAgent(ABC):
         board_arr = np.array(board, copy=True)
         forced_move, safe_moves = GameEnv.safety_net_choices(board_arr, current_player, valid_moves)
         return forced_move, safe_moves
+
+    # def _finalize_episode(self, outcome_reward: float):
+    #     if not self._episode_transitions:
+    #         return
+
+    #     return_to_go = float(outcome_reward)
+    #     for transition in reversed(self._episode_transitions):
+    #         state = transition["state"]
+    #         action = transition["action"]
+    #         state_h = self._make_hashable(state)
+    #         state_q = self.q_values.setdefault(state_h, defaultdict(float))
+    #         current_q = state_q.get(action, 0.0)
+    #         state_q[action] = current_q + self.lr * (return_to_go - current_q)
+    #         return_to_go *= self.gamma
+
+    #     self._episode_transitions.clear()

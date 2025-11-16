@@ -71,10 +71,7 @@ class TicTacToe9x9:
 
     def check_winner(self, return_cells: bool = False) -> Any:
         """Returns:
-        - 1 if X wins
-        - -1 if O wins
-        - 0 if draw
-        - None if ongoing
+        - None if ongoing or player piece if there's a winner, or 0 for draw.
 
         If return_cells=True, also returns the list of winning cell coordinates.
         """

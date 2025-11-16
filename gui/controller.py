@@ -1,5 +1,6 @@
 import tkinter as tk
 from typing import Callable, Optional, Tuple, Dict, List
+from game.board import PlayerPiece
 from gui.enums import GameMode
 from gui.components import SpeedInput
 from gui.runner import GameLoop
@@ -22,7 +23,6 @@ class GameController:
         self,
         root: tk.Misc,
         env: GameEnv,
-        drawer: BoardDrawer,
         mode: GameMode,
         bot1: Optional[BotType] = None,
         bot2: Optional[BotType] = None,
@@ -39,15 +39,15 @@ class GameController:
         # Register controllers in the environment. If None, register a
         # human controller that pops from the corresponding human queue.
         if self.bot1 is None:
-            self.env.register_controller(1, lambda e, _, p=1: self._pop_human_move(p))
-            self._human_players.add(1)
+            self.env.register_controller(PlayerPiece.X.value, lambda e, _s, _sh, p=PlayerPiece.X.value: self._pop_human_move(p))
+            self._human_players.add(PlayerPiece.X.value)
         else:
-            self.env.register_controller(1, self.bot1)
+            self.env.register_controller(PlayerPiece.X.value, self.bot1)
         if self.bot2 is None:
-            self.env.register_controller(-1, lambda e, _, p=-1: self._pop_human_move(p))
-            self._human_players.add(-1)
+            self.env.register_controller(PlayerPiece.O.value, lambda e, _s, _sh, p=PlayerPiece.O.value: self._pop_human_move(p))
+            self._human_players.add(PlayerPiece.O.value)
         else:
-            self.env.register_controller(-1, self.bot2)
+            self.env.register_controller(PlayerPiece.O.value, self.bot2)
         # Will be set in attach_view
         self.view = None
         self.loop: Optional[GameLoop] = None

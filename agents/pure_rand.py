@@ -15,13 +15,10 @@ class PureRandomAgent(BaseAgent):
     def name(self):
         return "PureRandomAgent"
 
-    def compute_reward(self, last_state, action: tuple[int, int] | None, new_state, winner) -> float:
-        # Pure random agent does not learn, so reward is always 0
-        return 0.0
-
     def choose_action(
         self,
         state,
+        state_hash,
         valid_moves: Sequence[tuple[int, int]],
         learn: bool = True,
         *,
@@ -41,3 +38,6 @@ class PureRandomAgent(BaseAgent):
 
         # fall back to full randomness
         return random.choice(valid_moves)
+    
+    def compute_reward(self, state, action, winner, mover) -> float:
+        return 0.0  # Pure random agent does not learn, so reward is always 0.
