@@ -17,17 +17,20 @@ class Winner(Enum):
 
 class TicTacToe9x9:
     """9x9 Tic Tac Toe with directional move restriction and 3-in-a-row win."""
-    SIZE = 9
 
     def __init__(self):
+        self.SIZE = 9
         self.board = np.zeros((self.SIZE, self.SIZE), dtype=int)  # 0 = empty, 1 = X, -1 = O
-        self.current_player = PlayerPiece.X.value
-        self.last_move = None
+        self.win_len = 3
+        self.reset()
 
     def reset(self):
         self.board.fill(0)
         self.current_player = PlayerPiece.X.value
+        self.last_player = None
         self.last_move = None
+        self.turn_count = 0
+        
 
     def get_valid_moves(self):
         if self.last_move is None:
@@ -61,12 +64,15 @@ class TicTacToe9x9:
             return False  # invalid move
         self.board[row, col] = self.current_player
         self.last_move = (row, col)
+        self.turn_count += 1
         # Flip current player using the PlayerPiece enum values rather than
         # hard-coded 1/-1.
         if self.current_player == PlayerPiece.X.value:
             self.current_player = PlayerPiece.O.value
+            self.last_player = PlayerPiece.X.value
         else:
             self.current_player = PlayerPiece.X.value
+            self.last_player = PlayerPiece.O.value
         return True
 
     def check_winner(self, return_cells: bool = False) -> Any:
@@ -95,3 +101,4 @@ class TicTacToe9x9:
             return (Winner.DRAW.value, None) if return_cells else Winner.DRAW.value
         return (Winner.ONGOING.value, None) if return_cells else Winner.ONGOING.value
 
+    

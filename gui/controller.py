@@ -39,12 +39,12 @@ class GameController:
         # Register controllers in the environment. If None, register a
         # human controller that pops from the corresponding human queue.
         if self.bot1 is None:
-            self.env.register_controller(PlayerPiece.X.value, lambda e, _s, _sh, p=PlayerPiece.X.value: self._pop_human_move(p))
+            self.env.register_controller(PlayerPiece.X.value, lambda e,: self._pop_human_move(PlayerPiece.X.value))
             self._human_players.add(PlayerPiece.X.value)
         else:
             self.env.register_controller(PlayerPiece.X.value, self.bot1)
         if self.bot2 is None:
-            self.env.register_controller(PlayerPiece.O.value, lambda e, _s, _sh, p=PlayerPiece.O.value: self._pop_human_move(p))
+            self.env.register_controller(PlayerPiece.O.value, lambda e,: self._pop_human_move(PlayerPiece.O.value))
             self._human_players.add(PlayerPiece.O.value)
         else:
             self.env.register_controller(PlayerPiece.O.value, self.bot2)

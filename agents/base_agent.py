@@ -12,6 +12,7 @@ class BaseAgent(ABC):
     def __init__(self, role = None, learning_rate: float = 0.01, discount_factor: float = 0.9, epsilon: float = 1.0, min_epsilon: float = 0.05, epsilon_decay: float = 0.995):
         self.role = role
         self.q_values = defaultdict(lambda: defaultdict(float))  # Q-table
+        self.visit_counts = defaultdict(lambda: defaultdict(int))  # For weighted merging
         self.lr = learning_rate
         self.gamma = discount_factor
         self.epsilon = epsilon
@@ -26,11 +27,12 @@ class BaseAgent(ABC):
         pass
 
     # --- Action selection (epsilon-greedy) ---
-    def choose_action(self, state, state_hash, valid_moves, learn: bool = True):
+    def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
-        state_q = self.q_values.setdefault(state_hash, defaultdict(float))  # ensure dict exists
+        state_q = self.q_values.setdefault(env.get_state_hash(), defaultdict(float))  # ensure dict exists
+        valid_moves = env.get_valid_moves()
 
-        safety_move, safe_moves = self._safety_net_choices(state, valid_moves)
+        safety_move, safe_moves = env.safety_net_choices()
         selected_move = None
 
         if safety_move is not None:
@@ -105,6 +107,7 @@ class BaseAgent(ABC):
 
             reward = self.compute_reward(state, action, winner, mover=mover)
             self.q_values[state][action] += reward
+            self.visit_counts[state][action] += 1
 
 
     def save(self, file_path: str):
@@ -139,27 +142,18 @@ class BaseAgent(ABC):
         agent.gamma = data.get("gamma", 0.9)
         return agent
     
-    
-
-    def _safety_net_choices(self, state, valid_moves):
-        """Return forced move if present and list of moves that keep the opponent from an immediate win."""
-        board, current_player = state
-        board_arr = np.array(board, copy=True)
-        forced_move, safe_moves = GameEnv.safety_net_choices(board_arr, current_player, valid_moves)
-        return forced_move, safe_moves
-
-    # def _finalize_episode(self, outcome_reward: float):
-    #     if not self._episode_transitions:
-    #         return
-
-    #     return_to_go = float(outcome_reward)
-    #     for transition in reversed(self._episode_transitions):
-    #         state = transition["state"]
-    #         action = transition["action"]
-    #         state_h = self._make_hashable(state)
-    #         state_q = self.q_values.setdefault(state_h, defaultdict(float))
-    #         current_q = state_q.get(action, 0.0)
-    #         state_q[action] = current_q + self.lr * (return_to_go - current_q)
-    #         return_to_go *= self.gamma
-
-    #     self._episode_transitions.clear()
+    def merge_q_tables(self, qtables, visit_tables):
+        """Weighted merge using visit counts."""
+        for qtable, visits in zip(qtables, visit_tables):
+            for state, actions in qtable.items():
+                state_q = self.q_values.setdefault(state, defaultdict(float))
+                state_visits = self.visit_counts.setdefault(state, defaultdict(int))
+                for action, value in actions.items():
+                    total_visits = state_visits[action] + visits[state][action]
+                    if total_visits == 0:
+                        continue
+                    # Weighted average
+                    state_q[action] = (
+                        state_q[action] * state_visits[action] + value * visits[state][action]
+                    ) / total_visits
+                    state_visits[action] = total_visits

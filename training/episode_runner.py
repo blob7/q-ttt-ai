@@ -19,7 +19,7 @@ def run_episode(env: GameEnv, agent_x: BaseAgent, agent_o: BaseAgent, coin_flip_
             winner = None
             break
 
-        action = first_agent.choose_action(state, env.get_state_hash(), valid_moves)
+        action = first_agent.choose_action(env)
         new_state, done, winner = env.step(action)
         if winner is not None:
             return env.state_history, winner
