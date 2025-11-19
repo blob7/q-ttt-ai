@@ -1,7 +1,7 @@
 import tkinter as tk
 from typing import Callable, Optional, Tuple, Dict, List
 from game.board import PlayerPiece
-from gui.enums import GameMode
+from gamemodes import GameMode
 from gui.components import SpeedInput
 from gui.runner import GameLoop
 from game.environment import GameEnv

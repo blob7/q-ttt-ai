@@ -30,6 +30,7 @@ class BaseAgent(ABC):
     def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
         state_q = self.q_values.setdefault(env.get_state_hash(), defaultdict(float))  # ensure dict exists
+        print(f"Choosing action for state: {env.get_state_hash()}, Q-values: {state_q}")
         valid_moves = env.get_valid_moves()
 
         safety_move, safe_moves = env.safety_net_choices()
@@ -67,7 +68,7 @@ class BaseAgent(ABC):
 
     # --- Reward computation ---
     @abstractmethod
-    def compute_reward(self, state, action, winner: Optional[int], mover) -> float:
+    def compute_reward(self, state, action, winner: Optional[int], mover, steps_from_end: int) -> float:
         """Must be implemented by each agent.
         Determines the reward for the last action based on agent's own logic."""
         pass
@@ -105,7 +106,7 @@ class BaseAgent(ABC):
             state = transition["state"]
             action = transition["action"]
 
-            reward = self.compute_reward(state, action, winner, mover=mover)
+            reward = self.compute_reward(state, action, winner, mover, reverse_idx)
             self.q_values[state][action] += reward
             self.visit_counts[state][action] += 1
 

@@ -3,7 +3,7 @@ from typing import Optional, Callable, Literal
 
 from gui.drawer import BoardDrawer
 from gui.controller import GameController
-from gui.enums import GameMode
+from gamemodes import GameMode
 from game.environment import GameEnv
 from game.board import Winner, PlayerPiece
 from gui.components import MoveHistoryPanel

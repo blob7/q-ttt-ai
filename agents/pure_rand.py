@@ -16,28 +16,16 @@ class PureRandomAgent(BaseAgent):
         return "PureRandomAgent"
 
     def choose_action(
-        self,
-        state,
-        state_hash,
-        valid_moves: Sequence[tuple[int, int]],
-        learn: bool = True,
-        *,
-        use_safety_net: bool = False,
-    ) -> tuple[int, int]:
-        if not valid_moves:
-            raise ValueError("valid_moves must contain at least one move")
-
+        self, env: GameEnv, learn: bool = True, *, use_safety_net: bool = True
+    ):
+        valid_moves = env.get_valid_moves()
         if use_safety_net:
-            board, current_player = state
-            board_arr = np.array(board, copy=True)
-            winning_move, safe_moves = GameEnv.safety_net_choices(board_arr, current_player, list(valid_moves))
-            if winning_move is not None:
-                return winning_move
-            if safe_moves:
+            safety_move, safe_moves = env.safety_net_choices()
+            if safety_move is not None:
+                return safety_move
+            elif safe_moves:
                 return random.choice(safe_moves)
-
-        # fall back to full randomness
         return random.choice(valid_moves)
     
-    def compute_reward(self, state, action, winner, mover) -> float:
-        return 0.0  # Pure random agent does not learn, so reward is always 0.
+    def compute_reward(self, state, action, winner: int | None, mover, steps_from_end: int) -> float:
+        return 0.0  # Pure random agent does not learn, so reward is always 0

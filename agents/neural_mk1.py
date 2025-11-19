@@ -1,3 +1,5 @@
+# depricated until memory becomes a problem
+
 import random
 from math import prod
 

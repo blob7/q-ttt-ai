@@ -21,7 +21,9 @@ class SimpleTicTacToeAgent(BaseAgent):
     def name(self) -> str:
         return "SimpleTicTacToeAgent"
 
-    def compute_reward(self, state, action, winner, mover) -> float:
+
+    
+    def compute_reward(self, state, action, winner, mover, steps_from_end: int) -> float:
         if winner == mover:
             return 1.0
         if winner in (None, 0):

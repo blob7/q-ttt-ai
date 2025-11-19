@@ -1,6 +1,6 @@
 # game/environment.py
 import functools
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from .board import TicTacToe9x9, Winner
 from .utils import print_board
@@ -38,7 +38,7 @@ class GameEnv:
     def get_state_hash(self):
         """Return a hashable representation of the current state for use as a key in Q-tables."""
         board, player = self.get_state()
-        return _cached_make_hashable(board.tobytes(), player, self.game.SIZE)
+        return _cached_make_hashable(board.tobytes(), player, self.game.SIZE, self.game.last_move)
 
     def get_board(self):
         """Return a copy of the underlying board array (read-only from caller POV)."""
@@ -141,7 +141,7 @@ class GameEnv:
         opponent = self.game.last_player  # opponent is the player who just moved
         valid_moves = self.get_valid_moves()
 
-        if self.game.turn_count <= 3 or opponent is None:
+        if self.game.turn_count < 3 or opponent is None:
             return None, valid_moves
 
         # forced win
@@ -158,10 +158,14 @@ class GameEnv:
                 return move, valid_moves
 
         # moves that avoid losing next turn
-        safe_moves = [
-            move for move in valid_moves
-            if not self.opponent_can_win_next(move, player, opponent)
-        ]
+        # safe_moves = [
+        #     move for move in valid_moves
+        #     if not self.opponent_can_win_next(move, player, opponent)
+        # ]
+        safe_moves = []
+        for move in valid_moves:
+            if not self.opponent_can_win_next(move, player, opponent):
+                safe_moves.append(move)
 
         return None, safe_moves
 
@@ -273,13 +277,12 @@ class GameEnv:
     
 
 
-
-
 # ----------------------------
 #       cache methods
 # ----------------------------
 @functools.lru_cache(maxsize=2**20)
-def _cached_make_hashable(board_bytes: bytes, player: int, game_size: int) -> tuple[str, int]:
+def _cached_make_hashable(board_bytes: bytes, player: int, game_size: int, last_move: Optional[Tuple[int, int]]) -> Tuple[str, int, Tuple[int, int]]:
+    lm: Tuple[int, int] = last_move if last_move is not None else (-1, -1)
     # Reconstruct the array
     board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
     
@@ -288,7 +291,7 @@ def _cached_make_hashable(board_bytes: bytes, player: int, game_size: int) -> tu
     flat = [cell for row in canonical_board for cell in row]
     encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
     
-    return (encoded, int(player))
+    return (encoded, int(player), lm)
 
 
 def _canonical_board(board: np.ndarray) -> np.ndarray:

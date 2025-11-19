@@ -1,6 +1,6 @@
 from typing import Optional
 from game.environment import GameEnv
-from gui.enums import GameMode
+from gamemodes import GameMode
 
 
 class GameLoop:
