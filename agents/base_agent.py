@@ -30,7 +30,6 @@ class BaseAgent(ABC):
     def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
         state_q = self.q_values.setdefault(env.get_state_hash(), defaultdict(float))  # ensure dict exists
-        print(f"Choosing action for state: {env.get_state_hash()}, Q-values: {state_q}")
         valid_moves = env.get_valid_moves()
 
         safety_move, safe_moves = env.safety_net_choices()

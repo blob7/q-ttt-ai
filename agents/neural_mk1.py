@@ -16,6 +16,7 @@ from game.board import TicTacToe9x9
 
 class QNetwork(nn.Module):
     def __init__(self, board_cells: int, extra_features: int = 2, hidden_sizes: tuple[int, ...] = (256, 128)) -> None:
+        raise NotImplementedError("NeuralQAgent is not yet implemented.")
         super().__init__()
         input_dim = board_cells + extra_features
         layers: list[nn.Module] = []

@@ -54,13 +54,11 @@ def select_starting_player_menu(player1: str, player2: str) -> str:
 def select_training_parameters_menu() -> dict:
     episodes = q.text("Enter the number of training episodes:", default="10_0000").ask()
     memory_threshold = q.text("Enter memory stop threshold in MB:", default="15_000").ask()
-    save_agents = q.confirm("Do you want to save the trained agents?").ask()
-    if save_agents:
-        agent_x_save_path = None
-        agent_o_save_path = None
-    else:
-        agent_x_save_path = q.text("Enter the file path to save the trained agent X:", default="data/saved_agents/agent_x_trained.pkl").ask()
-        agent_o_save_path = q.text("Enter the file path to save the trained agent O:", default="data/saved_agents/agent_o_trained.pkl").ask()
+    agent_x_save_path = q.text("Enter the file name to save the first trained agent (leave blank for none):", default="").ask()
+    agent_x_save_path = "data/saved_agents/" + agent_x_save_path + ".pkl" if agent_x_save_path else None
+    agent_o_save_path = q.text("Enter the file name to save the second trained agent (leave blank for none):", default="").ask()
+    agent_o_save_path = "data/saved_agents/" + agent_o_save_path + ".pkl" if agent_o_save_path else None
+    
     show_progress = q.confirm("Do you want to show training progress?").ask()
     
     
@@ -73,7 +71,13 @@ def select_training_parameters_menu() -> dict:
     }
 
 def select_competition_parameters_menu() -> dict:
-    num_games = q.text("Enter the number of games for the competition:", default="10_000").ask()
+    episodes = q.text("Enter the number of games for the competition:", default="1_000").ask()
+    show_progress = q.confirm("Do you want to show competition progress?").ask()
+    visualize = q.confirm("Do you want to visualize the competition dashboard?").ask()
+    
+    
     return {
-        "num_games": int(num_games)
+        "episodes": int(episodes),
+        "show_progress": show_progress,
+        "visualize": visualize,
     }

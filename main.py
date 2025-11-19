@@ -9,8 +9,8 @@ from gamemodes import GameMode
 
 from agents import *
 
-from training.train import train_agents
-
+from agent_play.train import train_agents
+from agent_play.competition import compete_bots
 
 
 import cProfile
@@ -18,60 +18,6 @@ import pstats
 
 import random
 
-
-# def main():
-#     print("1. Play vs Bot")
-#     print("2. Play vs Human")
-#     print("3. Watch Bot vs Bot")
-#     print("4. Train AI")
-#     print("5. View Match")
-#     choice = input("> ")
-
-#     match choice:
-#         case "1":
-#             print("playing against bot")
-#             if False:
-#                 random_bot = PureRandomAgent(role=PlayerPiece.O)
-#                 bot = lambda env: random_bot.choose_action(env, False, use_safety_net=True)
-#                 gui = TicTacToeGUI(mode=GameMode.PLAYER_V_BOT, bot2=bot)
-#             else:
-#                 simple_agent = SimpleTicTacToeAgent.load("data/saved_agents/simple_agent_100k.pkl", role=PlayerPiece.O.value)
-#                 bot = lambda env: simple_agent.choose_action(env, False)
-#                 # print(simple_agent.epsilon, simple_agent.learning_rate, simple_agent.discount_factor)
-#                 # print(simple_agent.q_values)
-#                 gui = TicTacToeGUI(mode=GameMode.PLAYER_V_BOT, bot2=bot)
-#         case "2":
-#             gui = TicTacToeGUI(mode=GameMode.PLAYER_V_PLAYER)
-#         case "3":
-#             random_bot = PureRandomAgent(role=PlayerPiece.X)
-#             gui = TicTacToeGUI(mode=GameMode.BOT_V_BOT, bot1=random_bot.choose_action, bot2=random_bot.choose_action)
-#         case "4":
-#             # profiler = cProfile.Profile()
-#             # profiler.enable()
-#             simple_agent_x = SimpleTicTacToeAgent(role=PlayerPiece.X.value)
-#             simple_agent_o = SimpleTicTacToeAgent(role=PlayerPiece.O.value)
-#             env = GameEnv()
-#             train_agents(
-#                 env=env, 
-#                 agent_x=simple_agent_x, 
-#                 agent_o=simple_agent_o, 
-#                 episodes=100_000, 
-#                 memory_stop_threshold_mb=15_000, 
-#                 agent_o_save_path="data/saved_agents/simple_agent_100k.pkl", 
-#                 show_progress=True,
-#                 coin_flip_start=True,
-#                 parallel=False,
-#             )
-#             # profiler.disable()
-#             # stats = pstats.Stats(profiler).sort_stats('cumtime')  # sort by cumulative time
-#             # stats.print_stats(20)  # top 20 functions
-#             return
-#         case "5":
-#             gui = TicTacToeGUI(mode=GameMode.VIEW_MATCH)
-#         case _:
-#             print("Invalid choice")
-#             return
-#     gui.run()
 
 import menus.game_setup as menu
 
@@ -97,8 +43,7 @@ def main():
             
             controller1 = lambda env: bot1.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
             controller2 = lambda env: bot2.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
-        
-        
+
     
         starting_player = menu.select_starting_player_menu(
             bot1.name, 
@@ -139,17 +84,15 @@ def main():
             )
         elif game_mode == GameMode.COMPETE_BOT_VS_BOT:
             competition_params = menu.select_competition_parameters_menu()
-
-            print('UNIMPLEMENTED: Bot vs Bot competition mode is not yet implemented.')
-            # competition_results = compete_bots(
-            #     env=env,
-            #     bot1=bot1,
-            #     bot2=bot2,
-            #     episodes=competition_params["episodes"],
-            #     coin_flip_start=coinflip_start,
-            # )
-            # print(f"Competition results: {competition_results}")
-
+            compete_bots(
+                env=env,
+                bot1=bot1,
+                bot2=bot2,
+                episodes=competition_params["episodes"],
+                coin_flip_start=coinflip_start,
+                show_progress=competition_params["show_progress"],
+                visualize=competition_params["visualize"],
+            )
 
 
 def load_agent(agent_choice: menu.AgentChoice, role: int, path: Optional[str]) -> BaseAgent:

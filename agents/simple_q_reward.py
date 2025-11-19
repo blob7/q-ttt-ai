@@ -20,8 +20,7 @@ class SimpleTicTacToeAgent(BaseAgent):
     @property
     def name(self) -> str:
         return "SimpleTicTacToeAgent"
-
-
+    
     
     def compute_reward(self, state, action, winner, mover, steps_from_end: int) -> float:
         if winner == mover:

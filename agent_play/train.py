@@ -1,11 +1,10 @@
 import os
-import signal
 from typing import List, Optional, Tuple
 from pathlib import Path
 
 from game.board import PlayerPiece
-from training.memory_utils import get_process, memory_limit_hit
-from training.episode_runner import run_episode
+from agent_play.memory_utils import get_process, memory_limit_hit
+from agent_play.episode_runner import run_episode
 from game.environment import GameEnv
 from agents.base_agent import BaseAgent
 
@@ -22,7 +21,6 @@ import math
 # --------------------------------------------------
 # Parallel training helper
 # --------------------------------------------------
-
 def _train_agents_parallel(env_class, agent_class_x, agent_class_o, episodes, coin_flip_start, max_workers=None):
     
     if max_workers is None:
@@ -96,7 +94,7 @@ def _train_agents_sequential(
                 print("Memory threshold reached; stopping early.")
                 break
             try:
-                state_history, winner = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
+                state_history, winner, stats = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
                 agent_x.learn_result(winner, state_history)
                 agent_o.learn_result(winner, state_history)
 
@@ -147,6 +145,7 @@ def train_agents(
 
 
     if parallel:
+        raise NotImplementedError("Parallel training is not yet implemented.")
         all_histories, q_tables_x, visit_tables_x, q_tables_o, visit_tables_o = _train_agents_parallel(
             type(env), type(agent_x), type(agent_o),
             episodes, coin_flip_start, max_workers
