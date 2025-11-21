@@ -29,19 +29,17 @@ def main():
     player2 = None
     bot2 = None
     controller2 = None
-    do_learning = False
     coinflip_start = False
     starting_player = None
 
     if game_mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
         player1 = menu.select_agent_menu()
         bot1 = load_agent(player1, role=PlayerPiece.X.value, path=menu.ask_file_path() if menu.select_agent_load_menu() == menu.AgentLoadChoice.FROM_FILE else None)
+        controller1 = lambda env: bot1.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
         
         if game_mode in (GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
             player2 = menu.select_agent_menu()
             bot2 = load_agent(player2, role=PlayerPiece.O.value, path=menu.ask_file_path() if menu.select_agent_load_menu() == menu.AgentLoadChoice.FROM_FILE else None)
-            
-            controller1 = lambda env: bot1.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
             controller2 = lambda env: bot2.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
 
     
@@ -53,12 +51,16 @@ def main():
 
     if game_mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT):
         if coinflip_start:
-            starting_player = random.choice([controller1, controller2])
+            first_player = random.choice([controller1, controller2])
             second_player = controller2 if starting_player == controller1 else controller1
-        elif bot1:
-            starting_player = controller1 if starting_player == bot1.name else controller2
-            second_player = controller2 if starting_player == controller1 else controller1
-        gui = TicTacToeGUI(mode=game_mode, bot1=controller1, bot2=controller2)
+        else:
+            if not bot1:
+                raise ValueError("Bot1 must be defined for PLAYER_V_BOT or BOT_V_BOT modes.")
+            first_player = controller1 if starting_player == bot1.name else controller2
+            second_player = controller2 if starting_player == bot1.name else controller1
+        
+        print(f'first_player: {first_player}, second_player: {second_player}')
+        gui = TicTacToeGUI(mode=game_mode, bot1=first_player, bot2=second_player)
         gui.run()
     elif game_mode == GameMode.PLAYER_V_PLAYER:
         gui = TicTacToeGUI(mode=game_mode)
@@ -92,6 +94,8 @@ def main():
                 coin_flip_start=coinflip_start,
                 show_progress=competition_params["show_progress"],
                 visualize=competition_params["visualize"],
+                bot1_name=competition_params.get("bot1_name", bot1.name),
+                bot2_name=competition_params.get("bot2_name", bot2.name),
             )
 
 

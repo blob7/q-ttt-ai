@@ -3,14 +3,14 @@ import matplotlib.pyplot as plt
 class WinRatePlot:
     """Track and plot cumulative win rates for two players."""
 
-    def __init__(self, ax):
+    def __init__(self, ax, player1_name: str = "Player 1", player2_name: str = "Player 2"):
         self.ax = ax
         self.games_played = []
         self.p1_win_rate = []
         self.p2_win_rate = []
 
-        self.line1, = ax.plot([], [], label="Player 1")
-        self.line2, = ax.plot([], [], label="Player 2")
+        self.line1, = ax.plot([], [], label=player1_name)
+        self.line2, = ax.plot([], [], label=player2_name)
         ax.set_ylim(0, 1)
         ax.set_xlabel("Games Played")
         ax.set_ylabel("Win Rate")

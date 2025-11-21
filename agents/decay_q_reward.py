@@ -22,10 +22,29 @@ class SimpleDecayTicTacToeAgent(BaseAgent):
         return "SimpleDecayTicTacToeAgent"
 
     
-    def compute_reward(self, state, action, winner, mover, steps_from_end: int) -> float:
-        # 0.2 for early start move if long game 1 for winnig move
-        if winner == mover:
-            return 1.0
+    def compute_reward(
+        self,
+        state,
+        action,
+        winner: int | None,
+        mover: int,
+        steps_from_end: int
+    ) -> float:
+        """Symmetric decayed rewards for both wins and losses, clamped at floors."""
+        min_win: float = 0.2  # floor for wins
+        max_loss: float = -0.2  # floor (ceiling) for losses
+    
+        # --- Draw case ---
         if winner in (None, 0):
             return 0.0
-        return -1.0
+    
+        # --- Shared decay for win/loss ---
+        decay: float = self.discount_factor ** steps_from_end   # 0 steps → 1.0
+    
+    
+        if winner == mover:
+            return round(max(min_win, decay), 3)
+        else:
+            return round(min(max_loss, -decay), 3)
+
+

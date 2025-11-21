@@ -33,12 +33,12 @@ class GameEnv:
 
     def get_state(self):
         """Return a tuple or flat version of the board (suitable for AI input)."""
-        return self.game.board.copy(), self.game.current_player
+        return self.game.board.copy(), self.game.current_player, self.game.last_move
     
     def get_state_hash(self):
         """Return a hashable representation of the current state for use as a key in Q-tables."""
-        board, player = self.get_state()
-        return _cached_make_hashable(board.tobytes(), player, self.game.SIZE, self.game.last_move)
+        board, player, last_move = self.get_state()
+        return _cached_make_hashable(board.tobytes(), player, self.game.SIZE, last_move)
 
     def get_board(self):
         """Return a copy of the underlying board array (read-only from caller POV)."""
@@ -282,35 +282,65 @@ class GameEnv:
 # ----------------------------
 @functools.lru_cache(maxsize=2**20)
 def _cached_make_hashable(board_bytes: bytes, player: int, game_size: int, last_move: Optional[Tuple[int, int]]) -> Tuple[str, int, Tuple[int, int]]:
-    lm: Tuple[int, int] = last_move if last_move is not None else (-1, -1)
     # Reconstruct the array
     board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
-    
-    # canonical version
-    canonical_board = _canonical_board(board)
+
+    # canonical version and aligned last move
+    canonical_board, canonical_move = _canonicalize_board_and_move(board, last_move)
+    lm: Tuple[int, int] = canonical_move if canonical_move is not None else (-1, -1)
     flat = [cell for row in canonical_board for cell in row]
     encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
-    
+
     return (encoded, int(player), lm)
 
 
+def _canonicalize_board_and_move(board: np.ndarray, last_move: Optional[Tuple[int, int]]) -> Tuple[np.ndarray, Optional[Tuple[int, int]]]:
+    """Return the canonical board plus the last move adjusted to that view."""
+    board = np.array(board, dtype=int, copy=False)
+    size = board.shape[0]
+    best_board: Optional[np.ndarray] = None
+    best_key: Optional[Tuple[int, ...]] = None
+    best_move: Optional[Tuple[int, int]] = None
+
+    for rotation in range(4):
+        rotated = np.rot90(board, rotation)
+        candidates = (
+            (rotated, False, False),
+            (np.fliplr(rotated), True, False),
+            (np.flipud(rotated), False, True),
+            (np.flipud(np.fliplr(rotated)), True, True),
+        )
+        for transformed, flip_lr, flip_ud in candidates:
+            key = tuple(int(x) for x in transformed.flatten())
+            if best_key is None or key < best_key:
+                best_key = key
+                best_board = transformed.copy()
+                if last_move is not None:
+                    best_move = _transform_coord(last_move, size, rotation, flip_lr, flip_ud)
+                else:
+                    best_move = None
+
+    if best_board is None:
+        raise ValueError("Failed to canonicalize board")
+
+    return best_board, best_move
+
+
 def _canonical_board(board: np.ndarray) -> np.ndarray:
-    """
-    Returns the lexicographically smallest board among all rotations and flips.
-    This includes 4 rotations * (original + horizontal flip + vertical flip + both) = 16 variants.
-    """
-    board = np.array(board, dtype=int)  # ensure consistent type
-    transforms = []
-    # Generate rotations
-    for k in range(4):
-        rotated = np.rot90(board, k)
-        transforms.append(rotated)                  # rotation only
-        transforms.append(np.fliplr(rotated))      # horizontal flip
-        transforms.append(np.flipud(rotated))      # vertical flip
-        transforms.append(np.flipud(np.fliplr(rotated)))  # both flips
-    # Pick the lexicographically smallest
-    canonical = min(transforms, key=lambda b: tuple(b.flatten()))
+    canonical, _ = _canonicalize_board_and_move(board, None)
     return canonical
+
+def _transform_coord(coord: Tuple[int, int], size: int, rotation: int, flip_lr: bool, flip_ud: bool) -> Tuple[int, int]:
+    """Apply the same rotation/flip as the board to a coordinate."""
+    r, c = coord
+    for _ in range(rotation % 4):
+        r, c = size - 1 - c, r
+    if flip_lr:
+        c = size - 1 - c
+    if flip_ud:
+        r = size - 1 - r
+    return (int(r), int(c))
+
 
 
 @functools.lru_cache(maxsize=2**20)

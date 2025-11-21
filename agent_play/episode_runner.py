@@ -1,12 +1,12 @@
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from game.board import PlayerPiece
 from game.environment import GameEnv
 from agents.base_agent import BaseAgent
 import random
 
-def run_episode(env: GameEnv, agent_x: BaseAgent, agent_o: BaseAgent, coin_flip_start: bool = False, record_stats: bool = False) -> Tuple[List[Any], Optional[int], Optional[dict]]:
+def run_episode(env: GameEnv, agent_x: BaseAgent, agent_o: BaseAgent, coin_flip_start: bool = False, record_stats: bool = False) -> Tuple[List[Any], Optional[int], Optional[Dict[str, Any]]]:
     """Run a single episode and return the winner."""
-    stats = None
+    stats: Optional[Dict[str, Any]] = None
 
     state = env.reset()
     done = False

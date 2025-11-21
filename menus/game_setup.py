@@ -37,7 +37,8 @@ def select_agent_load_menu() -> AgentLoadChoice:
     return AgentLoadChoice(choice)
 
 def ask_file_path() -> str:
-    path = q.text("Enter the file path to load the agent from:", default="data/saved_agents/simple_agent_100k.pkl").ask()
+    path = q.text("Enter the name of the file to load the agent from:", default="").ask()
+    path = "data/saved_agents/" + path + ".pkl"
     return path
 
 def select_starting_player_menu(player1: str, player2: str) -> str:
@@ -52,7 +53,7 @@ def select_starting_player_menu(player1: str, player2: str) -> str:
     return choice
 
 def select_training_parameters_menu() -> dict:
-    episodes = q.text("Enter the number of training episodes:", default="10_0000").ask()
+    episodes = q.text("Enter the number of training episodes:", default="100_000").ask()
     memory_threshold = q.text("Enter memory stop threshold in MB:", default="15_000").ask()
     agent_x_save_path = q.text("Enter the file name to save the first trained agent (leave blank for none):", default="").ask()
     agent_x_save_path = "data/saved_agents/" + agent_x_save_path + ".pkl" if agent_x_save_path else None
@@ -74,6 +75,8 @@ def select_competition_parameters_menu() -> dict:
     episodes = q.text("Enter the number of games for the competition:", default="1_000").ask()
     show_progress = q.confirm("Do you want to show competition progress?").ask()
     visualize = q.confirm("Do you want to visualize the competition dashboard?").ask()
+    bot1_name = q.text("Enter the name for Bot 1 (leave blank for default):", default="").ask()
+    bot2_name = q.text("Enter the name for Bot 2 (leave blank for default):", default="").ask()
     
     
     return {

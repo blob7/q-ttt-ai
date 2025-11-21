@@ -14,7 +14,7 @@ class BaseAgent(ABC):
         self.q_values = defaultdict(lambda: defaultdict(float))  # Q-table
         self.visit_counts = defaultdict(lambda: defaultdict(int))  # For weighted merging
         self.lr = learning_rate
-        self.gamma = discount_factor
+        self.discount_factor = discount_factor
         self.epsilon = epsilon
         self.min_epsilon = min_epsilon
         self.epsilon_decay = epsilon_decay
@@ -30,6 +30,8 @@ class BaseAgent(ABC):
     def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
         state_q = self.q_values.setdefault(env.get_state_hash(), defaultdict(float))  # ensure dict exists
+        print(f"Choosing action for state: {env.get_state_hash()} with")
+        print(f"Q-values: {dict(state_q)}")
         valid_moves = env.get_valid_moves()
 
         safety_move, safe_moves = env.safety_net_choices()
@@ -122,7 +124,7 @@ class BaseAgent(ABC):
                 "q_values": q_values_dict,
                 "epsilon": self.epsilon,
                 "lr": self.lr,
-                "gamma": self.gamma
+                "discount_factor": self.discount_factor
             }, f)
         print(f"Agent saved to {path}")
 
@@ -139,7 +141,7 @@ class BaseAgent(ABC):
                                     {tuple(k): defaultdict(float, v) for k, v in data["q_values"].items()})
         agent.epsilon = data.get("epsilon", 0.2)
         agent.lr = data.get("lr", 0.1)
-        agent.gamma = data.get("gamma", 0.9)
+        agent.discount_factor = data.get("discount_factor", 0.9)
         return agent
     
     def merge_q_tables(self, qtables, visit_tables):
