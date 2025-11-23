@@ -1,10 +1,50 @@
 # game/environment.py
-import functools
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from .board import TicTacToe9x9, Winner
 from .utils import print_board
 from game.board import PlayerPiece
+from game.shared_cache import digest_bytes, get_cache
+
+
+Coord = Tuple[int, int]
+Board = np.ndarray
+Transform = Callable[[Board], Board]
+MoveTransform = Callable[[Coord, int], Coord]
+Line = List[Coord]
+
+def precompute_lines(size: int, win_len: int) -> dict[tuple[int, int], list[list[tuple[int, int]]]]:
+    """Precompute all win_len-length lines that contain each cell."""
+    mapping: dict[tuple[int, int], list[list[tuple[int, int]]]] = {
+        (r, c): [] for r in range(size) for c in range(size)
+    }
+
+    dirs = [
+        (0, 1),   # horizontal →
+        (1, 0),   # vertical ↓
+        (1, 1),   # diag ↘
+        (1, -1),  # anti-diag ↙
+    ]
+
+    for r in range(size):
+        for c in range(size):
+            for dr, dc in dirs:
+                # Try to build a line centered around (r,c)
+                for offset in range(-(win_len - 1), 1):
+                    line: list[tuple[int, int]] = []
+                    for k in range(win_len):
+                        rr = r + (offset + k) * dr
+                        cc = c + (offset + k) * dc
+                        if 0 <= rr < size and 0 <= cc < size:
+                            line.append((rr, cc))
+                        else:
+                            break
+                    if len(line) == win_len and (r, c) in line:
+                        mapping[(r, c)].append(line)
+
+    return mapping
+
+LINES_BY_CELL = precompute_lines(9, 3)
 
 
 class GameEnv:
@@ -13,7 +53,7 @@ class GameEnv:
         self.game = TicTacToe9x9()
         self.history: List[Dict[str, Any]] = [] # list of {player: PlayerPiece.value, move: (row, col), board: np.ndarray}
         self.state_history: List[Dict[str, Any]] = [] # list of {state: hash(board, current_player), action: (row, col)}
-        
+
         # index into history that represents the current state. -1 means
         # no moves have been played (history empty). When jumping back in
         # history this will be set to that index; new moves should truncate
@@ -117,6 +157,7 @@ class GameEnv:
         print_board(self.game.board)
 
     def check_winner(self, return_cells=False):
+        """scans for a winner"""
         return self.game.check_winner(return_cells=return_cells)
     
     def evaluate_after_move(self) -> int | Any:
@@ -135,83 +176,183 @@ class GameEnv:
             size=self.game.SIZE
         )
 
+
     def safety_net_choices(self):
-        """Return (forced_move, safe_moves)."""
+        """Return (forced_move, safe_moves). Uses precomputed lines to detect forced wins/blocks."""
         player = self.game.current_player
-        opponent = self.game.last_player  # opponent is the player who just moved
+        opponent = self.game.last_player
         valid_moves = self.get_valid_moves()
 
-        if self.game.turn_count < 3 or opponent is None:
+        if self.game.turn_count < self.game.win_len or opponent is None:
             return None, valid_moves
 
-        # forced win
-        for move in valid_moves:
-            winning_move = _cached_is_winning_move(
-                move=move,
-                player=player,
-                board_bytes=self.game.board.tobytes(),
-                turn_count=self.game.turn_count + 1,
-                win_len=self.game.win_len,
-                game_size=self.game.SIZE
-            )
-            if winning_move:
-                return move, valid_moves
+        b = self.game.board
+        # ---------- Forced win (fast, exact) ----------
+        for mv in valid_moves:
+            for line in LINES_BY_CELL[mv]:
+                if _line_becomes_win(b, line, mv, player):
+                    # immediate win found
+                    return mv, valid_moves
 
-        # moves that avoid losing next turn
-        # safe_moves = [
-        #     move for move in valid_moves
-        #     if not self.opponent_can_win_next(move, player, opponent)
-        # ]
+        # ---------- Safe moves ----------
         safe_moves = []
-        for move in valid_moves:
-            if not self.opponent_can_win_next(move, player, opponent):
-                safe_moves.append(move)
+        for mv in valid_moves:
+            if not self.opponent_can_win_next(mv, player, opponent):
+                safe_moves.append(mv)
 
         return None, safe_moves
 
 
-    def opponent_can_win_next(self, move: tuple[int, int], player: int, opponent: int) -> bool:
-        """Return True if applying 'move' lets opponent win on their next move."""
 
-        # simulate our move once
-        board_backup = self.game.board
+
+    # def opponent_can_win_next(self, move: tuple[int, int], player: int, opponent: int) -> bool:
+    #     """Return True if applying 'move' lets opponent win on their next move."""
+
+    #     # simulate our move once
+    #     board_backup = self.game.board
+    #     last_backup = self.game.last_move
+    #     player_backup = self.game.current_player
+
+    #     self.game.board = self._simulate_move(move, player)
+    #     self.game.last_move = move
+    #     self.game.current_player = opponent
+
+    #     opp_moves = self.get_valid_moves()
+
+    #     for opp_move in opp_moves:
+    #         winning_move = _cached_is_winning_move(
+    #             move=opp_move,
+    #             player=opponent,
+    #             board_bytes=self.game.board.tobytes(),
+    #             turn_count=self.game.turn_count + 1,
+    #             win_len=self.game.win_len,
+    #             game_size=self.game.SIZE
+    #         )
+    #         if winning_move:
+    #             # restore first
+    #             self.game.board = board_backup
+    #             self.game.last_move = last_backup
+    #             self.game.current_player = player_backup
+    #             return True
+
+    #     # restore
+    #     self.game.board = board_backup
+    #     self.game.last_move = last_backup
+    #     self.game.current_player = player_backup
+    #     return False
+
+    # def opponent_can_win_next(
+    #     self,
+    #     move: tuple[int, int],
+    #     player: int,
+    #     opponent: int
+    # ) -> bool:
+    #     """Return True if applying 'move' lets opponent immediately win next turn."""
+
+    #     board_backup = self.game.board
+    #     last_backup = self.game.last_move
+    #     player_backup = self.game.current_player
+
+    #     self.game.board = self._simulate_move(move, player)
+    #     self.game.last_move = move
+    #     self.game.current_player = opponent
+
+    #     opp_moves = self.get_valid_moves()
+    #     b = self.game.board
+
+    #     for om in opp_moves:
+    #         # For each line that contains this move
+    #         for line in LINES_BY_CELL[om]:
+    #             # Simulate opponent placing om
+    #             # We only modify one cell temporarily
+    #             if b[om] != 0:
+    #                 continue  # impossible but safe
+
+    #             # temporarily apply move
+    #             b[om] = opponent
+    #             if line_would_win(b, line, opponent):
+    #                 b[om] = 0
+    #                 self.game.board = board_backup
+    #                 self.game.last_move = last_backup
+    #                 self.game.current_player = player_backup
+    #                 return True
+    #             # undo
+    #             b[om] = 0
+
+    #     self.game.board = board_backup
+    #     self.game.last_move = last_backup
+    #     self.game.current_player = player_backup
+    #     return False
+
+
+    def opponent_can_win_next(self, move: tuple[int,int], player: int, opponent: int) -> bool:
+        """
+        Return True if applying 'move' (by player) allows 'opponent' to immediately win next turn.
+
+        This applies the move in-place, temporarily adjusts game state so get_valid_moves()
+        returns the opponent's legal moves, then checks only the precomputed win-length
+        lines that pass through each opponent candidate cell.
+        """
+        b = self.game.board
+        r, c = move
+
+        # Apply move in-place
+        prev = b[r, c]
+        b[r, c] = player
+
+        # Temporarily adjust game metadata used by get_valid_moves()
         last_backup = self.game.last_move
-        player_backup = self.game.current_player
-
-        self.game.board = self._simulate_move(move, player)
+        current_backup = self.game.current_player
         self.game.last_move = move
         self.game.current_player = opponent
 
-        opp_moves = self.get_valid_moves()
+        try:
+            opp_moves = self.get_valid_moves()  # valid under the simulated board/last_move
 
-        for opp_move in opp_moves:
-            winning_move = _cached_is_winning_move(
-                move=opp_move,
-                player=opponent,
-                board_bytes=self.game.board.tobytes(),
-                turn_count=self.game.turn_count + 1,
-                win_len=self.game.win_len,
-                game_size=self.game.SIZE
-            )
-            if winning_move:
-                # restore first
-                self.game.board = board_backup
-                self.game.last_move = last_backup
-                self.game.current_player = player_backup
-                return True
+            for om in opp_moves:
+                # skip if cell already occupied (defensive)
+                if b[om] != 0:
+                    continue
 
-        # restore
-        self.game.board = board_backup
-        self.game.last_move = last_backup
-        self.game.current_player = player_backup
-        return False
+                # For each win_len-sized line that contains this opponent move
+                for line in LINES_BY_CELL[om]:
+                    # Quick prune: if any other cell in the line is occupied by 'player', can't win on this line
+                    blocked = False
+                    for rr, cc in line:
+                        if (rr, cc) == om:
+                            continue
+                        if b[rr, cc] == player:
+                            blocked = True
+                            break
+                    if blocked:
+                        continue
 
-    def _simulate_move(self, move: tuple[int, int], player: int) -> np.ndarray:
-        """Return a copy of the board with the move applied."""
-        r, c = move
-        new_board = self.game.board.copy()
-        new_board[r, c] = player
-        return new_board
+                    # Check if all other cells are opponent -> immediate win if opponent places at om
+                    win = True
+                    for rr, cc in line:
+                        if (rr, cc) == om:
+                            continue
+                        if b[rr, cc] != opponent:
+                            win = False
+                            break
+                    if win:
+                        return True
+
+            return False
+        finally:
+            # Restore board and metadata
+            b[r, c] = prev
+            self.game.last_move = last_backup
+            self.game.current_player = current_backup
+
+
+
+    # def _simulate_move(self, move: tuple[int, int], player: int) -> np.ndarray:
+    #     """Return a copy of the board with the move applied."""
+    #     r, c = move
+    #     new_board = self.game.board.copy()
+    #     new_board[r, c] = player
+    #     return new_board
     
     def jump_to_move(self, index: int):
         """Set the game state to a specific move in history."""
@@ -229,6 +370,7 @@ class GameEnv:
         # track current history index so subsequent steps truncate future
         # history entries (undo -> new move behaviour)
         self.current_history_index = index
+
 
     def export_history(self, path: str) -> None:
         """Save a minimal representation of the match history to a JSON file.
@@ -280,110 +422,195 @@ class GameEnv:
 # ----------------------------
 #       cache methods
 # ----------------------------
-@functools.lru_cache(maxsize=2**20)
-def _cached_make_hashable(board_bytes: bytes, player: int, game_size: int, last_move: Optional[Tuple[int, int]]) -> Tuple[str, int, Tuple[int, int]]:
-    # Reconstruct the array
-    board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
+def _cached_make_hashable(
+    board_bytes: bytes,
+    player: int,
+    game_size: int,
+    last_move: Optional[Coord]
+) -> Tuple[str, int, Coord]:
+    cache = get_cache("state_hash")
+    board_digest = digest_bytes(board_bytes)
+    move_key = last_move if last_move is not None else (-1, -1)
 
-    # canonical version and aligned last move
-    canonical_board, canonical_move = _canonicalize_board_and_move(board, last_move)
-    lm: Tuple[int, int] = canonical_move if canonical_move is not None else (-1, -1)
-    flat = [cell for row in canonical_board for cell in row]
-    encoded = ''.join(str(cell if cell >= 0 else 2) for cell in flat)
+    def compute() -> Tuple[str, int, Coord]:
+        board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
+        canonical_board, canonical_move = canonicalize_board_and_move(board, last_move)
+        flat = "".join(str(int(x) if x >= 0 else 2) for x in canonical_board.flatten())
+        lm = canonical_move if canonical_move is not None else (-1, -1)
+        return (flat, player, lm)
 
-    return (encoded, int(player), lm)
+    return cache.get_or_set((board_digest, player, game_size, move_key), compute)
 
 
-def _canonicalize_board_and_move(board: np.ndarray, last_move: Optional[Tuple[int, int]]) -> Tuple[np.ndarray, Optional[Tuple[int, int]]]:
-    """Return the canonical board plus the last move adjusted to that view."""
-    board = np.array(board, dtype=int, copy=False)
+
+def canonicalize_board_and_move(
+    board: Board,
+    last_move: Optional[Coord]
+) -> Tuple[Board, Optional[Coord]]:
+    """Return canonical board and move using D4 symmetries."""
+    
     size = board.shape[0]
-    best_board: Optional[np.ndarray] = None
-    best_key: Optional[Tuple[int, ...]] = None
-    best_move: Optional[Tuple[int, int]] = None
 
-    for rotation in range(4):
-        rotated = np.rot90(board, rotation)
-        candidates = (
-            (rotated, False, False),
-            (np.fliplr(rotated), True, False),
-            (np.flipud(rotated), False, True),
-            (np.flipud(np.fliplr(rotated)), True, True),
-        )
-        for transformed, flip_lr, flip_ud in candidates:
-            key = tuple(int(x) for x in transformed.flatten())
-            if best_key is None or key < best_key:
-                best_key = key
-                best_board = transformed.copy()
-                if last_move is not None:
-                    best_move = _transform_coord(last_move, size, rotation, flip_lr, flip_ud)
-                else:
-                    best_move = None
+    best_key = None
+    best_board = None
+    best_move = None
 
-    if best_board is None:
-        raise ValueError("Failed to canonicalize board")
+    for board_tf, move_tf in d4_transforms(size):
+        
+        b2 = board_tf(board)
 
+        # Flatten key used for lexicographic comparison
+        key = tuple(int(x) for x in b2.flatten())
+        
+        if best_key is None or key < best_key:
+            best_key = key
+            best_board = b2
+
+            if last_move is not None:
+                best_move = move_tf(last_move)
+            else:
+                best_move = None
+
+    assert best_board is not None
     return best_board, best_move
 
 
-def _canonical_board(board: np.ndarray) -> np.ndarray:
-    canonical, _ = _canonicalize_board_and_move(board, None)
-    return canonical
 
-def _transform_coord(coord: Tuple[int, int], size: int, rotation: int, flip_lr: bool, flip_ud: bool) -> Tuple[int, int]:
-    """Apply the same rotation/flip as the board to a coordinate."""
-    r, c = coord
-    for _ in range(rotation % 4):
-        r, c = size - 1 - c, r
-    if flip_lr:
-        c = size - 1 - c
-    if flip_ud:
-        r = size - 1 - r
-    return (int(r), int(c))
+def d4_transforms(size: int):
+    """Return 8 board and move transforms of the D4 symmetry group."""
+    
+    def rotate_move(coord: Coord, k: int) -> Coord:
+        r, c = coord
+        for _ in range(k % 4):
+            r, c = size - 1 - c, r
+        return r, c
+
+    def flip_lr_move(coord: Coord) -> Coord:
+        r, c = coord
+        return r, size - 1 - c
+
+    def flip_ud_move(coord: Coord) -> Coord:
+        r, c = coord
+        return size - 1 - r, c
+
+    # 1. Identity
+    yield (lambda b: b, lambda m: m)
+
+    # 2–4. Rot90, Rot180, Rot270
+    for k in (1, 2, 3):
+        yield (lambda b, k=k: rot90(b, k), lambda m, k=k: rotate_move(m, k))
+
+    # 5. Reflect (vertical flip)
+    yield (flip_lr, lambda m: flip_lr_move(m))
+
+    # 6. Reflect (horizontal flip)
+    yield (flip_ud, lambda m: flip_ud_move(m))
+
+    # 7. Reflect across main diagonal (transpose)
+    yield (lambda b: b.T, lambda m: (m[1], m[0]))
+
+    # 8. Reflect across anti-diagonal
+    yield (lambda b: rot90(b, 1).T, lambda m: rotate_move((m[1], m[0]), 3))
+
+
+def rot90(b: Board, k: int) -> Board:
+    return np.rot90(b, k)
+
+def flip_lr(b: Board) -> Board:
+    return np.fliplr(b)
+
+def flip_ud(b: Board) -> Board:
+    return np.flipud(b)
+
+def _cached_is_winning_move(
+    board_bytes: bytes,
+    move: tuple[int,int],
+    player: int,
+    game_size: int,
+    win_len: int,
+    turn_count: int
+) -> bool:
+    cache = get_cache("winning_move")
+    board_digest = digest_bytes(board_bytes)
+
+    def compute() -> bool:
+        board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size)).copy()
+        board[move] = player
+        return _did_last_move_win(
+            last_player=player,
+            last_move=move,
+            board=board,
+            turn_count=turn_count,
+            win_len=win_len,
+            size=game_size,
+            lines_by_cell=LINES_BY_CELL,
+        )
+
+    key = (board_digest, move, player, game_size, win_len, turn_count)
+    return cache.get_or_set(key, compute)
 
 
 
-@functools.lru_cache(maxsize=2**20)
-def _cached_is_winning_move(board_bytes: bytes, move: tuple[int,int], player: int, game_size: int, win_len: int, turn_count: int) -> bool:
-    board = np.copy(np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size)))
-    r, c = move
-    board[r, c] = player
-    return _did_last_move_win(player, move, board, turn_count, win_len, board.shape[0])
-
-
-def evaluate_after_move(last_player: int, valid_moves: list, last_move: Optional[tuple[int, int]], board: np.ndarray, turn_count: int, win_len: int, size: int) -> int | Any:
-    """Return winner, draw, or None."""
-    if _did_last_move_win(last_player, last_move, board, turn_count, win_len, size):
+def evaluate_after_move(
+    last_player: int,
+    valid_moves: list,
+    last_move: tuple[int,int] | None,
+    board: np.ndarray,
+    turn_count: int,
+    win_len: int,
+    size: int,
+):
+    if _did_last_move_win(last_player, last_move, board, turn_count, win_len, size, LINES_BY_CELL):
         return last_player
-    if len(valid_moves) == 0:
+    if not valid_moves:
         return Winner.DRAW.value
     return None
 
 
-def _did_last_move_win(last_player: int, last_move: Optional[tuple[int, int]], board: np.ndarray, turn_count: int, win_len: int, size: int) -> bool:
-    """Check only the lines that pass through self.last_move."""
-    if turn_count < win_len or last_move is None:
-        return False  # Not enough moves have been made to have a winner
-    r, c = last_move
-    b = board
-    row = b[r, :]
-    col = b[:, c]
-    diag = b.diagonal(offset=c - r)
-    anti = np.fliplr(b).diagonal(offset=(size - 1 - c) - r)
-    return (
-        _has_consecutive(row, last_player, win_len) or
-        _has_consecutive(col, last_player, win_len) or
-        _has_consecutive(diag, last_player, win_len) or
-        _has_consecutive(anti, last_player, win_len)
-    )
 
-def _has_consecutive(seq, player, win_len):
-    count = 0
-    for x in seq:
-        if x == player:
-            count += 1
-            if count >= win_len:
-                return True
-        else:
-            count = 0
+def _did_last_move_win(
+    last_player: int,
+    last_move: tuple[int, int] | None,
+    board: np.ndarray,
+    turn_count: int,
+    win_len: int,
+    size: int,
+    lines_by_cell: dict[tuple[int,int], list[list[tuple[int,int]]]]
+) -> bool:
+    if last_move is None or turn_count < win_len:
+        return False
+
+    r, c = last_move
+
+    # All lines through this cell
+    for line in lines_by_cell[(r, c)]:
+        count = 0
+        for rr, cc in line:
+            if board[rr, cc] == last_player:
+                count += 1
+                if count == win_len:
+                    return True
+            else:
+                count = 0
     return False
+
+
+
+
+def line_would_win(board: np.ndarray, line: list[tuple[int, int]], player: int) -> bool:
+    """Check if placing a move on the last cell of the line forms a win."""
+    # All cells must match the player.
+    for rr, cc in line:
+        if board[rr, cc] != player:
+            return False
+    return True
+
+def _line_becomes_win(board: np.ndarray, line: Line, cell: Coord, player: int) -> bool:
+    """Return True if placing player at `cell` completes this `line`."""
+    # All other cells in the line must already be occupied by `player`.
+    for rr, cc in line:
+        if (rr, cc) == cell:
+            continue
+        if board[rr, cc] != player:
+            return False
+    return True

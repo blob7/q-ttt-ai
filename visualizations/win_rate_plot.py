@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+# deprecated using cumalitve wins instead
 
 class WinRatePlot:
     """Track and plot cumulative win rates for two players."""

@@ -1,3 +1,4 @@
+from typing import Optional, Tuple
 import questionary as q
 
 from enum import Enum
@@ -18,28 +19,14 @@ class AgentChoice(Enum):
     DECAY_Q_AGENT = "Decay Q-Learning Agent"
     PURE_RANDOM_AGENT = "Pure Random Agent"
 
-def select_agent_menu() -> AgentChoice:
+def select_agent_menu() -> Tuple[AgentChoice, Optional[str]]:
     choice = q.select(
         "Select an agent:",
         choices=[agent.value for agent in AgentChoice]
     ).ask()
-    return AgentChoice(choice)
-
-class AgentLoadChoice(Enum):
-    FROM_FILE = "Load from file"
-    FRESH = "Start fresh"
-
-def select_agent_load_menu() -> AgentLoadChoice:
-    choice = q.select(
-        "Do you want to load an existing agent or start fresh?",
-        choices=[option.value for option in AgentLoadChoice]
-    ).ask()
-    return AgentLoadChoice(choice)
-
-def ask_file_path() -> str:
-    path = q.text("Enter the name of the file to load the agent from:", default="").ask()
-    path = "data/saved_agents/" + path + ".pkl"
-    return path
+    path = q.text("Enter the name of the file to load the agent from (leave blank for fresh agent):", default="").ask()
+    path = "data/saved_agents/" + path + ".pkl" if path else None
+    return AgentChoice(choice), path
 
 def select_starting_player_menu(player1: str, player2: str) -> str:
     choice = q.select(
@@ -55,13 +42,14 @@ def select_starting_player_menu(player1: str, player2: str) -> str:
 def select_training_parameters_menu() -> dict:
     episodes = q.text("Enter the number of training episodes:", default="100_000").ask()
     memory_threshold = q.text("Enter memory stop threshold in MB:", default="15_000").ask()
+    
     agent_x_save_path = q.text("Enter the file name to save the first trained agent (leave blank for none):", default="").ask()
     agent_x_save_path = "data/saved_agents/" + agent_x_save_path + ".pkl" if agent_x_save_path else None
     agent_o_save_path = q.text("Enter the file name to save the second trained agent (leave blank for none):", default="").ask()
     agent_o_save_path = "data/saved_agents/" + agent_o_save_path + ".pkl" if agent_o_save_path else None
     
     show_progress = q.confirm("Do you want to show training progress?").ask()
-    
+    parallel = q.confirm("Do you want to train in parallel?").ask()
     
     return {
         "episodes": int(episodes),
@@ -69,6 +57,7 @@ def select_training_parameters_menu() -> dict:
         "agent_x_save_path": agent_x_save_path,
         "agent_o_save_path": agent_o_save_path,
         "show_progress": show_progress,
+        "parallel": parallel,
     }
 
 def select_competition_parameters_menu() -> dict:
@@ -83,4 +72,6 @@ def select_competition_parameters_menu() -> dict:
         "episodes": int(episodes),
         "show_progress": show_progress,
         "visualize": visualize,
+        "bot1_name": bot1_name if bot1_name else None,
+        "bot2_name": bot2_name if bot2_name else None,
     }

@@ -43,8 +43,8 @@ class SimpleDecayTicTacToeAgent(BaseAgent):
     
     
         if winner == mover:
-            return round(max(min_win, decay), 3)
+            return max(min_win, decay)
         else:
-            return round(min(max_loss, -decay), 3)
+            return min(max_loss, -decay)
 
 

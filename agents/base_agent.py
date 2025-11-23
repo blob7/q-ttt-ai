@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from contextlib import nullcontext
 import random
 import pickle
 from pathlib import Path
@@ -8,17 +9,39 @@ import numpy as np
 from game.board import PlayerPiece
 from game.environment import GameEnv
 
+
+def _state_q_factory():
+    return defaultdict(float)
+
+
+def _state_visit_factory():
+    return defaultdict(int)
+
 class BaseAgent(ABC):   
-    def __init__(self, role = None, learning_rate: float = 0.01, discount_factor: float = 0.9, epsilon: float = 1.0, min_epsilon: float = 0.05, epsilon_decay: float = 0.995):
+    def __init__(
+        self,
+        role=None,
+        learning_rate: float = 0.01,
+        discount_factor: float = 0.9,
+        epsilon: float = 1.0,
+        min_epsilon: float = 0.05,
+        epsilon_decay: float = 0.995,
+        *,
+        q_values=None,
+        visit_counts=None,
+        table_lock=None,
+    ):
         self.role = role
-        self.q_values = defaultdict(lambda: defaultdict(float))  # Q-table
-        self.visit_counts = defaultdict(lambda: defaultdict(int))  # For weighted merging
         self.lr = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
         self.min_epsilon = min_epsilon
         self.epsilon_decay = epsilon_decay
         self._episode_transitions = []  # stack
+        self._table_lock = table_lock
+        default_q = q_values if q_values is not None else defaultdict(_state_q_factory)
+        default_visits = visit_counts if visit_counts is not None else defaultdict(_state_visit_factory)
+        self.configure_tables(default_q, default_visits, table_lock=self._table_lock)
 
     @property
     @abstractmethod
@@ -29,9 +52,14 @@ class BaseAgent(ABC):
     # --- Action selection (epsilon-greedy) ---
     def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
-        state_q = self.q_values.setdefault(env.get_state_hash(), defaultdict(float))  # ensure dict exists
-        print(f"Choosing action for state: {env.get_state_hash()} with")
-        print(f"Q-values: {dict(state_q)}")
+        state_hash = env.get_state_hash()
+        with self._lock_context():
+            state_q_snapshot = self._get_state_q_snapshot(state_hash)
+        verbose = False  # Set to True to see action selection details
+        if verbose:
+            print('-'*20)
+            print(f"Choosing action for state: {state_hash} | turn {env.game.turn_count}")
+            print(f"Q-values: {state_q_snapshot}")
         valid_moves = env.get_valid_moves()
 
         safety_move, safe_moves = env.safety_net_choices()
@@ -51,7 +79,7 @@ class BaseAgent(ABC):
                 best_move = None
                 best_value = float('-inf')
                 for move in eligible_moves:
-                    q = state_q.get(move, 0.0)  # lazy read
+                    q = state_q_snapshot.get(move, 0.0)
                     if q > best_value:
                         best_move = move
                         best_value = q
@@ -91,25 +119,26 @@ class BaseAgent(ABC):
         total_moves = len(state_history)
 
         # Reverse order for reward discounting
-        for reverse_idx, transition in enumerate(reversed(state_history)):
-            real_idx = total_moves - 1 - reverse_idx
+        with self._lock_context():
+            for reverse_idx, transition in enumerate(reversed(state_history)):
+                real_idx = total_moves - 1 - reverse_idx
 
-            # Determine which player made this move
-            if real_idx % 2 == 0:
-                mover = PlayerPiece.X.value
-            else:
-                mover = PlayerPiece.O.value
+                # Determine which player made this move
+                if real_idx % 2 == 0:
+                    mover = PlayerPiece.X.value
+                else:
+                    mover = PlayerPiece.O.value
 
-            # Skip if this move is not from the desired player(s)
-            if mover not in learn_set:
-                continue
+                # Skip if this move is not from the desired player(s)
+                if mover not in learn_set:
+                    continue
 
-            state = transition["state"]
-            action = transition["action"]
+                state = transition["state"]
+                action = transition["action"]
 
-            reward = self.compute_reward(state, action, winner, mover, reverse_idx)
-            self.q_values[state][action] += reward
-            self.visit_counts[state][action] += 1
+                reward = self.compute_reward(state, action, winner, mover, reverse_idx)
+                self._increment_q_value(state, action, reward)
+                self._increment_visit_count(state, action)
 
 
     def save(self, file_path: str):
@@ -136,9 +165,8 @@ class BaseAgent(ABC):
             data = pickle.load(f)
 
         agent = cls(role=role)  # Create instance
-        # Wrap back into defaultdicts
-        agent.q_values = defaultdict(lambda: defaultdict(float),
-                                    {tuple(k): defaultdict(float, v) for k, v in data["q_values"].items()})
+        for state, actions in data.get("q_values", {}).items():
+            agent._set_state_q_values(state, actions)
         agent.epsilon = data.get("epsilon", 0.2)
         agent.lr = data.get("lr", 0.1)
         agent.discount_factor = data.get("discount_factor", 0.9)
@@ -146,16 +174,107 @@ class BaseAgent(ABC):
     
     def merge_q_tables(self, qtables, visit_tables):
         """Weighted merge using visit counts."""
-        for qtable, visits in zip(qtables, visit_tables):
-            for state, actions in qtable.items():
-                state_q = self.q_values.setdefault(state, defaultdict(float))
-                state_visits = self.visit_counts.setdefault(state, defaultdict(int))
-                for action, value in actions.items():
-                    total_visits = state_visits[action] + visits[state][action]
-                    if total_visits == 0:
-                        continue
-                    # Weighted average
-                    state_q[action] = (
-                        state_q[action] * state_visits[action] + value * visits[state][action]
-                    ) / total_visits
-                    state_visits[action] = total_visits
+        with self._lock_context():
+            for qtable, visits in zip(qtables, visit_tables):
+                for state, actions in qtable.items():
+                    visit_source = visits.get(state, {})
+                    for action, value in actions.items():
+                        add_visits = visit_source.get(action, 0)
+                        self._merge_q_value(state, action, value, add_visits)
+
+    # ------------------
+    # Internal helpers
+    # ------------------
+    def configure_tables(
+        self,
+        q_values,
+        visit_counts,
+        *,
+        table_lock=None,
+    ) -> None:
+        self.q_values = q_values
+        self.visit_counts = visit_counts
+        self._table_lock = table_lock
+
+    def _lock_context(self):
+        return self._table_lock if self._table_lock is not None else nullcontext()
+
+    def _get_state_q_snapshot(self, state):
+        if isinstance(self.q_values, defaultdict):
+            return dict(self.q_values[state])
+        return dict(self.q_values.get(state, {}))
+
+    def _increment_q_value(self, state, action, delta):
+        if isinstance(self.q_values, defaultdict):
+            state_q = self.q_values[state]
+            state_q[action] = round(state_q.get(action, 0.0) + delta, 3)
+        else:
+            state_q = dict(self.q_values.get(state, {}))
+            state_q[action] = round(state_q.get(action, 0.0) + delta, 3)
+            self.q_values[state] = state_q
+
+    def _increment_visit_count(self, state, action, increment=1):
+        if isinstance(self.visit_counts, defaultdict):
+            state_visits = self.visit_counts[state]
+            state_visits[action] = state_visits.get(action, 0) + increment
+        else:
+            state_visits = dict(self.visit_counts.get(state, {}))
+            state_visits[action] = state_visits.get(action, 0) + increment
+            self.visit_counts[state] = state_visits
+
+    def _merge_q_value(self, state, action, value, added_visits):
+        if added_visits == 0:
+            return
+        if isinstance(self.q_values, defaultdict):
+            state_q = self.q_values[state]
+            state_visits = self.visit_counts[state]
+            current_visits = state_visits.get(action, 0)
+            total_visits = current_visits + added_visits
+            if total_visits == 0:
+                return
+            prev = state_q.get(action, 0.0)
+            state_q[action] = (prev * current_visits + value * added_visits) / total_visits
+            state_visits[action] = total_visits
+        else:
+            state_q = dict(self.q_values.get(state, {}))
+            state_visits = dict(self.visit_counts.get(state, {}))
+            current_visits = state_visits.get(action, 0)
+            total_visits = current_visits + added_visits
+            if total_visits == 0:
+                self.q_values[state] = state_q
+                self.visit_counts[state] = state_visits
+                return
+            prev = state_q.get(action, 0.0)
+            state_q[action] = (prev * current_visits + value * added_visits) / total_visits
+            state_visits[action] = total_visits
+            self.q_values[state] = state_q
+            self.visit_counts[state] = state_visits
+
+    def materialize_tables(self) -> None:
+        new_q = defaultdict(_state_q_factory)
+        for state, actions in self.q_values.items():
+            state_q = new_q[state]
+            state_q.update(dict(actions))
+
+        new_visits = defaultdict(_state_visit_factory)
+        for state, actions in self.visit_counts.items():
+            state_visits = new_visits[state]
+            state_visits.update(dict(actions))
+
+        self.configure_tables(
+            new_q,
+            new_visits,
+            table_lock=None,
+        )
+
+    def _set_state_q_values(self, state, actions: dict) -> None:
+        if isinstance(self.q_values, defaultdict):
+            self.q_values[state].update(actions)
+        else:
+            self.q_values[state] = dict(actions)
+
+    def _set_state_visit_values(self, state, actions: dict) -> None:
+        if isinstance(self.visit_counts, defaultdict):
+            self.visit_counts[state].update(actions)
+        else:
+            self.visit_counts[state] = dict(actions)

@@ -33,13 +33,13 @@ def main():
     starting_player = None
 
     if game_mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
-        player1 = menu.select_agent_menu()
-        bot1 = load_agent(player1, role=PlayerPiece.X.value, path=menu.ask_file_path() if menu.select_agent_load_menu() == menu.AgentLoadChoice.FROM_FILE else None)
+        player1, path1 = menu.select_agent_menu()
+        bot1 = load_agent(player1, role=PlayerPiece.X.value, path=path1)
         controller1 = lambda env: bot1.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
         
         if game_mode in (GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
-            player2 = menu.select_agent_menu()
-            bot2 = load_agent(player2, role=PlayerPiece.O.value, path=menu.ask_file_path() if menu.select_agent_load_menu() == menu.AgentLoadChoice.FROM_FILE else None)
+            player2, path2 = menu.select_agent_menu()
+            bot2 = load_agent(player2, role=PlayerPiece.O.value, path=path2)
             controller2 = lambda env: bot2.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
 
     
@@ -52,14 +52,13 @@ def main():
     if game_mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT):
         if coinflip_start:
             first_player = random.choice([controller1, controller2])
-            second_player = controller2 if starting_player == controller1 else controller1
+            second_player = controller2 if first_player == controller1 else controller1
         else:
             if not bot1:
                 raise ValueError("Bot1 must be defined for PLAYER_V_BOT or BOT_V_BOT modes.")
             first_player = controller1 if starting_player == bot1.name else controller2
             second_player = controller2 if starting_player == bot1.name else controller1
         
-        print(f'first_player: {first_player}, second_player: {second_player}')
         gui = TicTacToeGUI(mode=game_mode, bot1=first_player, bot2=second_player)
         gui.run()
     elif game_mode == GameMode.PLAYER_V_PLAYER:
@@ -82,7 +81,7 @@ def main():
                 agent_o_save_path=training_params["agent_o_save_path"],
                 show_progress=training_params["show_progress"],
                 coin_flip_start=coinflip_start,
-                parallel=False,
+                parallel=training_params['parallel'],
             )
         elif game_mode == GameMode.COMPETE_BOT_VS_BOT:
             competition_params = menu.select_competition_parameters_menu()
@@ -110,4 +109,9 @@ def load_agent(agent_choice: menu.AgentChoice, role: int, path: Optional[str]) -
         raise ValueError(f"Invalid agent choice: {agent_choice}")
 
 if __name__ == "__main__":
+    profiler = cProfile.Profile()
+    profiler.enable()
     main()
+    profiler.disable()
+    stats = pstats.Stats(profiler).sort_stats('cumtime')
+    stats.print_stats(20)  # Print top 20 functions by cumulative time
