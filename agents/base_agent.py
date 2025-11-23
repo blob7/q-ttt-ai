@@ -4,7 +4,7 @@ from contextlib import nullcontext
 import random
 import pickle
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import numpy as np
 from game.board import PlayerPiece
 from game.environment import GameEnv
@@ -195,32 +195,86 @@ class BaseAgent(ABC):
         self.q_values = q_values
         self.visit_counts = visit_counts
         self._table_lock = table_lock
+        self._track_deltas = False
+        self._pending_q_deltas = defaultdict(_state_q_factory)
+        self._pending_visit_deltas = defaultdict(_state_visit_factory)
 
     def _lock_context(self):
         return self._table_lock if self._table_lock is not None else nullcontext()
+
+    def enable_delta_tracking(self) -> None:
+        with self._lock_context():
+            self._track_deltas = True
+            self._pending_q_deltas = defaultdict(_state_q_factory)
+            self._pending_visit_deltas = defaultdict(_state_visit_factory)
+
+    def disable_delta_tracking(self) -> None:
+        with self._lock_context():
+            self._track_deltas = False
+            self._pending_q_deltas = defaultdict(_state_q_factory)
+            self._pending_visit_deltas = defaultdict(_state_visit_factory)
+
+    def drain_deltas(self) -> tuple[Dict, Dict]:
+        with self._lock_context():
+            q_delta = {state: dict(actions) for state, actions in self._pending_q_deltas.items() if actions}
+            visit_delta = {state: dict(actions) for state, actions in self._pending_visit_deltas.items() if actions}
+            self._pending_q_deltas = defaultdict(_state_q_factory)
+            self._pending_visit_deltas = defaultdict(_state_visit_factory)
+            return q_delta, visit_delta
+
+    def apply_deltas(self, q_delta: Dict, visit_delta: Dict) -> None:
+        with self._lock_context():
+            for state, actions in q_delta.items():
+                for action, delta in actions.items():
+                    self._increment_q_value(state, action, delta, track=False)
+            for state, actions in visit_delta.items():
+                for action, inc in actions.items():
+                    self._increment_visit_count(state, action, inc, track=False)
 
     def _get_state_q_snapshot(self, state):
         if isinstance(self.q_values, defaultdict):
             return dict(self.q_values[state])
         return dict(self.q_values.get(state, {}))
 
-    def _increment_q_value(self, state, action, delta):
+    def _increment_q_value(self, state, action, delta, *, track: bool = True):
         if isinstance(self.q_values, defaultdict):
             state_q = self.q_values[state]
-            state_q[action] = round(state_q.get(action, 0.0) + delta, 3)
         else:
             state_q = dict(self.q_values.get(state, {}))
-            state_q[action] = round(state_q.get(action, 0.0) + delta, 3)
             self.q_values[state] = state_q
 
-    def _increment_visit_count(self, state, action, increment=1):
+        prev = state_q.get(action, 0.0)
+        new_value = round(prev + delta, 3)
+        state_q[action] = new_value
+
+        if track and getattr(self, "_track_deltas", False):
+            pending = self._pending_q_deltas[state]
+            applied = new_value - prev
+            pending[action] = pending.get(action, 0.0) + applied
+            if pending[action] == 0.0:
+                pending.pop(action, None)
+            if not pending:
+                self._pending_q_deltas.pop(state, None)
+
+    def _increment_visit_count(self, state, action, increment=1, *, track: bool = True):
         if isinstance(self.visit_counts, defaultdict):
             state_visits = self.visit_counts[state]
-            state_visits[action] = state_visits.get(action, 0) + increment
         else:
             state_visits = dict(self.visit_counts.get(state, {}))
-            state_visits[action] = state_visits.get(action, 0) + increment
             self.visit_counts[state] = state_visits
+
+        prev = state_visits.get(action, 0)
+        new_count = prev + increment
+        state_visits[action] = new_count
+
+        if track and getattr(self, "_track_deltas", False):
+            pending = self._pending_visit_deltas[state]
+            applied = new_count - prev
+            pending[action] = pending.get(action, 0) + applied
+            if pending[action] == 0:
+                pending.pop(action, None)
+            if not pending:
+                self._pending_visit_deltas.pop(state, None)
 
     def _merge_q_value(self, state, action, value, added_visits):
         if added_visits == 0:

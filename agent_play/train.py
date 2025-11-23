@@ -1,9 +1,8 @@
 import os
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from multiprocessing import Manager
-from multiprocessing.managers import SyncManager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
@@ -13,32 +12,6 @@ from agents.base_agent import BaseAgent
 from game.environment import GameEnv
 from game import shared_cache
 
-# ===== New Shared Training Implementation =====
-
-
-def _attach_shared_tables(agent: BaseAgent, manager: SyncManager) -> None:
-    """Attach Manager-backed dictionaries to an agent for shared Q-learning."""
-    shared_q = manager.dict()
-    shared_visits = manager.dict()
-
-    for state, actions in agent.q_values.items():
-        shared_q[state] = dict(actions)
-
-    for state, actions in agent.visit_counts.items():
-        shared_visits[state] = dict(actions)
-
-    for state in list(shared_q.keys()):
-        if state not in shared_visits:
-            shared_visits[state] = {}
-
-    lock = manager.RLock()
-    agent.configure_tables(
-        shared_q,
-        shared_visits,
-        table_lock=lock,
-    )
-
-
 def _play_episode_worker(
     env_class: type[GameEnv],
     agent_x: BaseAgent,
@@ -47,16 +20,45 @@ def _play_episode_worker(
     collect_history: bool,
     cache_context: Optional[Dict[str, Any]] = None,
     disable_shared_cache: bool = False,
-) -> Optional[List[Dict[str, Any]]]:
+    episodes_per_batch: int = 1,
+    epsilon_start_x: Optional[float] = None,
+    epsilon_start_o: Optional[float] = None,
+) -> Tuple[Optional[List[List[Dict[str, Any]]]], Dict, Dict, Dict, Dict, int]:
     if disable_shared_cache:
         shared_cache.install_context(None)
     else:
         shared_cache.ensure_context(cache_context)
+
+    histories: Optional[List[List[Dict[str, Any]]]] = [] if collect_history else None
     env = env_class()
-    state_history, winner, _ = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
-    agent_x.learn_result(winner, state_history)
-    agent_o.learn_result(winner, state_history)
-    return env.history.copy() if collect_history else None
+
+    # Enable delta tracking so we can return only the updates produced in this batch.
+    agent_x.enable_delta_tracking()
+    agent_o.enable_delta_tracking()
+
+    if epsilon_start_x is not None:
+        agent_x.epsilon = epsilon_start_x
+    if epsilon_start_o is not None:
+        agent_o.epsilon = epsilon_start_o
+
+    episodes_run = 0
+    while episodes_run < episodes_per_batch:
+        state_history, winner, _ = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
+        agent_x.learn_result(winner, state_history)
+        agent_o.learn_result(winner, state_history)
+
+        episodes_run += 1
+
+        if histories is not None:
+            histories.append(env.history.copy())
+
+        agent_x.epsilon = max(agent_x.min_epsilon, agent_x.epsilon * agent_x.epsilon_decay)
+        agent_o.epsilon = max(agent_o.min_epsilon, agent_o.epsilon * agent_o.epsilon_decay)
+
+    q_delta_x, visit_delta_x = agent_x.drain_deltas()
+    q_delta_o, visit_delta_o = agent_o.drain_deltas()
+
+    return histories, q_delta_x, visit_delta_x, q_delta_o, visit_delta_o, episodes_run
 
 
 def _train_agents_parallel(
@@ -74,6 +76,12 @@ def _train_agents_parallel(
     cache_context: Optional[Dict[str, Any]],
     disable_shared_cache: bool,
 ) -> List[List[Dict[str, Any]]]:
+    def advance_epsilon(value: float, decay: float, minimum: float, steps: int) -> float:
+        eps = value
+        for _ in range(steps):
+            eps = max(minimum, eps * decay)
+        return eps
+
     if disable_shared_cache:
         shared_cache.install_context(None)
     else:
@@ -87,17 +95,33 @@ def _train_agents_parallel(
         cpu_guess = max(1, (os.cpu_count() or 2) - 1)
         worker_count = min(cpu_guess, episodes)
 
-    futures: set[Future] = set()
+    approx = episodes // (worker_count * 4) if worker_count else episodes
+    batch_size = min(64, max(1, approx))
+
     histories: List[List[Dict[str, Any]]] = []
     submitted = 0
     completed = 0
     stop = False
 
+    scheduled_eps_x = agent_x.epsilon
+    scheduled_eps_o = agent_o.epsilon
+    completed_eps_x = agent_x.epsilon
+    completed_eps_o = agent_o.epsilon
+
+    pending: set[Future] = set()
+
     progress = tqdm(total=episodes, ncols=80, desc="Training (parallel)", disable=not show_progress)
     try:
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             while completed < episodes and not stop:
-                while submitted < episodes and len(futures) < worker_count and not stop:
+                while submitted < episodes and len(pending) < worker_count and not stop:
+                    remaining = episodes - submitted
+                    current_batch = min(batch_size, remaining)
+                    start_eps_x = scheduled_eps_x
+                    start_eps_o = scheduled_eps_o
+                    scheduled_eps_x = advance_epsilon(scheduled_eps_x, agent_x.epsilon_decay, agent_x.min_epsilon, current_batch)
+                    scheduled_eps_o = advance_epsilon(scheduled_eps_o, agent_o.epsilon_decay, agent_o.min_epsilon, current_batch)
+
                     future = executor.submit(
                         _play_episode_worker,
                         env_class,
@@ -107,40 +131,51 @@ def _train_agents_parallel(
                         collect_history,
                         cache_context,
                         disable_shared_cache,
+                        current_batch,
+                        start_eps_x,
+                        start_eps_o,
                     )
-                    futures.add(future)
-                    submitted += 1
+                    pending.add(future)
+                    submitted += current_batch
 
-                if not futures:
+                if not pending:
                     break
 
-                future = next(as_completed(futures))
-                futures.remove(future)
+                finished = next(as_completed(pending))
+                pending.discard(finished)
                 try:
-                    match_history = future.result()
+                    batch_histories, q_delta_x, visit_delta_x, q_delta_o, visit_delta_o, episodes_run = finished.result()
                 except BaseException:
                     stop = True
-                    for pending in futures:
-                        pending.cancel()
+                    for leftover in list(pending):
+                        leftover.cancel()
                     raise
 
-                if collect_history and match_history is not None:
-                    histories.append(match_history)
+                if collect_history and batch_histories:
+                    histories.extend(batch_histories)
 
-                completed += 1
-                progress.update(1)
+                agent_x.apply_deltas(q_delta_x, visit_delta_x)
+                agent_o.apply_deltas(q_delta_o, visit_delta_o)
 
-                agent_x.decay_epsilon()
-                agent_o.decay_epsilon()
+                completed += episodes_run
+                progress.update(episodes_run)
+
+                completed_eps_x = advance_epsilon(completed_eps_x, agent_x.epsilon_decay, agent_x.min_epsilon, episodes_run)
+                completed_eps_o = advance_epsilon(completed_eps_o, agent_o.epsilon_decay, agent_o.min_epsilon, episodes_run)
+                agent_x.epsilon = completed_eps_x
+                agent_o.epsilon = completed_eps_o
 
                 if memory_limit_hit(process, memory_stop_threshold_mb):
                     stop = True
 
             if stop:
-                for pending in futures:
-                    pending.cancel()
+                for leftover in list(pending):
+                    leftover.cancel()
     finally:
         progress.close()
+
+    agent_x.epsilon = completed_eps_x
+    agent_o.epsilon = completed_eps_o
 
     return histories
 
@@ -215,11 +250,12 @@ def train_agents(
 
     try:
         if parallel:
-            manager = Manager()
-            cache_context = shared_cache.create_shared_context(manager)
-            shared_cache.install_context(cache_context)
-            _attach_shared_tables(agent_x, manager)
-            _attach_shared_tables(agent_o, manager)
+            if not disable_shared_cache:
+                manager = Manager()
+                cache_context = shared_cache.create_shared_context(manager)
+                shared_cache.install_context(cache_context)
+            else:
+                shared_cache.install_context(None)
             all_histories = _train_agents_parallel(
                 env_class=type(env),
                 agent_x=agent_x,
@@ -232,7 +268,7 @@ def train_agents(
                 memory_stop_threshold_mb=memory_stop_threshold_mb,
                 process=process,
                 cache_context=cache_context,
-                disable_shared_cache=True,
+                disable_shared_cache=disable_shared_cache,
             )
         else:
             shared_cache.install_context(None)
@@ -250,11 +286,7 @@ def train_agents(
     finally:
         shared_cache.install_context(None)
         if manager is not None:
-            try:
-                agent_x.materialize_tables()
-                agent_o.materialize_tables()
-            finally:
-                manager.shutdown()
+            manager.shutdown()
 
     if history_path and all_histories:
         _download_training_data(all_histories, Path(history_path))
