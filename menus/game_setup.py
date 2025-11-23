@@ -41,7 +41,7 @@ def select_starting_player_menu(player1: str, player2: str) -> str:
 
 def select_training_parameters_menu() -> dict:
     episodes = q.text("Enter the number of training episodes:", default="100_000").ask()
-    memory_threshold = q.text("Enter memory stop threshold in MB:", default="15_000").ask()
+    memory_threshold = q.text("Enter memory stop threshold in MB:", default="16_000").ask()
     
     agent_x_save_path = q.text("Enter the file name to save the first trained agent (leave blank for none):", default="").ask()
     agent_x_save_path = "data/saved_agents/" + agent_x_save_path + ".pkl" if agent_x_save_path else None

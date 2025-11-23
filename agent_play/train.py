@@ -1,64 +1,117 @@
 import os
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-from multiprocessing import Manager
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
 from agent_play.episode_runner import run_episode
 from agent_play.memory_utils import get_process, memory_limit_hit
 from agents.base_agent import BaseAgent
+from agents.shared_backend import SharedActionValueBackend
 from game.environment import GameEnv
-from game import shared_cache
 
-def _play_episode_worker(
-    env_class: type[GameEnv],
-    agent_x: BaseAgent,
-    agent_o: BaseAgent,
-    coin_flip_start: bool,
-    collect_history: bool,
-    cache_context: Optional[Dict[str, Any]] = None,
-    disable_shared_cache: bool = False,
-    episodes_per_batch: int = 1,
-    epsilon_start_x: Optional[float] = None,
-    epsilon_start_o: Optional[float] = None,
-) -> Tuple[Optional[List[List[Dict[str, Any]]]], Dict, Dict, Dict, Dict, int]:
-    if disable_shared_cache:
-        shared_cache.install_context(None)
-    else:
-        shared_cache.ensure_context(cache_context)
 
-    histories: Optional[List[List[Dict[str, Any]]]] = [] if collect_history else None
-    env = env_class()
+_WORKER_ENV_CLASS = None
+_WORKER_AGENT_TEMPLATE_X: Optional[BaseAgent] = None
+_WORKER_AGENT_TEMPLATE_O: Optional[BaseAgent] = None
+_WORKER_ENV_INSTANCE: Optional[GameEnv] = None
+_WORKER_AGENT_X_INSTANCE: Optional[BaseAgent] = None
+_WORKER_AGENT_O_INSTANCE: Optional[BaseAgent] = None
+_WORKER_COIN_FLIP = False
+_WORKER_COLLECT_HISTORY = False
 
-    # Enable delta tracking so we can return only the updates produced in this batch.
-    agent_x.enable_delta_tracking()
-    agent_o.enable_delta_tracking()
 
-    if epsilon_start_x is not None:
-        agent_x.epsilon = epsilon_start_x
-    if epsilon_start_o is not None:
-        agent_o.epsilon = epsilon_start_o
+def _init_process_worker(env_class, agent_template_x, agent_template_o, coin_flip_start, collect_history):
+    global _WORKER_ENV_CLASS, _WORKER_AGENT_TEMPLATE_X, _WORKER_AGENT_TEMPLATE_O
+    global _WORKER_ENV_INSTANCE, _WORKER_AGENT_X_INSTANCE, _WORKER_AGENT_O_INSTANCE
+    global _WORKER_COIN_FLIP, _WORKER_COLLECT_HISTORY
 
-    episodes_run = 0
-    while episodes_run < episodes_per_batch:
-        state_history, winner, _ = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
+    _WORKER_ENV_CLASS = env_class
+    _WORKER_AGENT_TEMPLATE_X = agent_template_x
+    _WORKER_AGENT_TEMPLATE_O = agent_template_o
+    _WORKER_COIN_FLIP = coin_flip_start
+    _WORKER_COLLECT_HISTORY = collect_history
+
+    _WORKER_ENV_INSTANCE = None
+    _WORKER_AGENT_X_INSTANCE = None
+    _WORKER_AGENT_O_INSTANCE = None
+
+
+def _process_worker_chunk(schedule_x: List[float], schedule_o: List[float]) -> tuple[List[List[Dict[str, Any]]], int]:
+    global _WORKER_ENV_INSTANCE, _WORKER_AGENT_X_INSTANCE, _WORKER_AGENT_O_INSTANCE
+
+    if _WORKER_ENV_CLASS is None or _WORKER_AGENT_TEMPLATE_X is None or _WORKER_AGENT_TEMPLATE_O is None:
+        raise RuntimeError("Worker not initialised")
+
+    if _WORKER_ENV_INSTANCE is None:
+        _WORKER_ENV_INSTANCE = _WORKER_ENV_CLASS()
+    if _WORKER_AGENT_X_INSTANCE is None:
+        _WORKER_AGENT_X_INSTANCE = _WORKER_AGENT_TEMPLATE_X.fork_shared()  # type: ignore[union-attr]
+    if _WORKER_AGENT_O_INSTANCE is None:
+        _WORKER_AGENT_O_INSTANCE = _WORKER_AGENT_TEMPLATE_O.fork_shared()  # type: ignore[union-attr]
+
+    env = _WORKER_ENV_INSTANCE
+    agent_x = _WORKER_AGENT_X_INSTANCE
+    agent_o = _WORKER_AGENT_O_INSTANCE
+
+    if env is None or agent_x is None or agent_o is None:
+        raise RuntimeError("Worker context not prepared")
+
+    local_histories: List[List[Dict[str, Any]]] = []
+
+    for eps_x, eps_o in zip(schedule_x, schedule_o):
+        agent_x.epsilon = eps_x
+        agent_o.epsilon = eps_o
+
+        state_history, winner, _ = run_episode(
+            env,
+            agent_x,
+            agent_o,
+            coin_flip_start=_WORKER_COIN_FLIP,
+        )
+
         agent_x.learn_result(winner, state_history)
         agent_o.learn_result(winner, state_history)
 
-        episodes_run += 1
+        if _WORKER_COLLECT_HISTORY:
+            local_histories.append(env.history.copy())
 
-        if histories is not None:
-            histories.append(env.history.copy())
+    return local_histories, len(schedule_x)
 
-        agent_x.epsilon = max(agent_x.min_epsilon, agent_x.epsilon * agent_x.epsilon_decay)
-        agent_o.epsilon = max(agent_o.min_epsilon, agent_o.epsilon * agent_o.epsilon_decay)
 
-    q_delta_x, visit_delta_x = agent_x.drain_deltas()
-    q_delta_o, visit_delta_o = agent_o.drain_deltas()
+def _estimate_backend_capacity(episodes: int) -> int:
+    estimated_states = episodes * 18
+    baseline = 200_000
+    cap = max(baseline, estimated_states)
+    return min(cap, 1_000_000)
 
-    return histories, q_delta_x, visit_delta_x, q_delta_o, visit_delta_o, episodes_run
+
+def _ensure_shared_backend(
+    agent_x: BaseAgent,
+    agent_o: BaseAgent,
+    *,
+    capacity: int,
+    max_actions: int,
+) -> None:
+    shared_backend = None
+    if agent_x.uses_shared_backend():
+        shared_backend = agent_x.get_shared_backend()
+    elif agent_o.uses_shared_backend():
+        shared_backend = agent_o.get_shared_backend()
+
+    if shared_backend is None:
+        shared_backend = SharedActionValueBackend.create(capacity=capacity, max_actions=max_actions)
+        agent_x.use_shared_backend(shared_backend, own=True)
+        agent_o.use_shared_backend(shared_backend.fork(), own=False)
+        return
+
+    if not agent_x.uses_shared_backend():
+        agent_x.use_shared_backend(shared_backend.fork(), own=False)
+    if not agent_o.uses_shared_backend():
+        agent_o.use_shared_backend(shared_backend.fork(), own=False)
+
 
 
 def _train_agents_parallel(
@@ -73,125 +126,122 @@ def _train_agents_parallel(
     collect_history: bool,
     memory_stop_threshold_mb: Optional[int],
     process,
-    cache_context: Optional[Dict[str, Any]],
-    disable_shared_cache: bool,
+    batch_size: Optional[int],
 ) -> List[List[Dict[str, Any]]]:
-    def advance_epsilon(value: float, decay: float, minimum: float, steps: int) -> float:
-        eps = value
-        for _ in range(steps):
-            eps = max(minimum, eps * decay)
-        return eps
-
-    if disable_shared_cache:
-        shared_cache.install_context(None)
-    else:
-        shared_cache.ensure_context(cache_context)
     if episodes <= 0:
         return []
+
+    size_hint = getattr(env_class, "SIZE", 9)
+    _ensure_shared_backend(
+        agent_x,
+        agent_o,
+        capacity=_estimate_backend_capacity(episodes),
+        max_actions=size_hint * size_hint,
+    )
 
     if max_workers:
         worker_count = max(1, min(max_workers, episodes))
     else:
         cpu_guess = max(1, (os.cpu_count() or 2) - 1)
-        worker_count = min(cpu_guess, episodes)
+        worker_count = max(1, min(cpu_guess, episodes))
 
-    approx = episodes // (worker_count * 4) if worker_count else episodes
-    batch_size = min(64, max(1, approx))
+    if worker_count <= 1:
+        histories = _train_agents_sequential(
+            env_class(),
+            agent_x,
+            agent_o,
+            episodes,
+            memory_stop_threshold_mb=memory_stop_threshold_mb,
+            process=process,
+            coin_flip_start=coin_flip_start,
+            collect_history=collect_history,
+            show_progress=show_progress,
+        )
+        return histories
+
+    schedule_x: List[float] = []
+    schedule_o: List[float] = []
+
+    def build_schedule(agent: BaseAgent, out: List[float]) -> None:
+        eps = agent.epsilon
+        for _ in range(episodes):
+            out.append(eps)
+            eps = max(agent.min_epsilon, eps * agent.epsilon_decay)
+
+    build_schedule(agent_x, schedule_x)
+    build_schedule(agent_o, schedule_o)
+
+    if batch_size is not None and batch_size > 0:
+        chunk_size = batch_size
+    else:
+        chunk_size = max(1, episodes // (worker_count * 6))
+    chunk_size = max(4, min(chunk_size, 32))
+
+    chunks: List[tuple[int, int]] = []
+    start = 0
+    while start < episodes:
+        end = min(start + chunk_size, episodes)
+        chunks.append((start, end))
+        start = end
 
     histories: List[List[Dict[str, Any]]] = []
-    submitted = 0
     completed = 0
-    stop = False
-
-    scheduled_eps_x = agent_x.epsilon
-    scheduled_eps_o = agent_o.epsilon
-    completed_eps_x = agent_x.epsilon
-    completed_eps_o = agent_o.epsilon
-
-    pending: set[Future] = set()
-
     progress = tqdm(total=episodes, ncols=80, desc="Training (parallel)", disable=not show_progress)
+
+    mp_ctx = get_context("spawn")
+
     try:
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            while completed < episodes and not stop:
-                while submitted < episodes and len(pending) < worker_count and not stop:
-                    remaining = episodes - submitted
-                    current_batch = min(batch_size, remaining)
-                    start_eps_x = scheduled_eps_x
-                    start_eps_o = scheduled_eps_o
-                    scheduled_eps_x = advance_epsilon(scheduled_eps_x, agent_x.epsilon_decay, agent_x.min_epsilon, current_batch)
-                    scheduled_eps_o = advance_epsilon(scheduled_eps_o, agent_o.epsilon_decay, agent_o.min_epsilon, current_batch)
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=mp_ctx,
+            initializer=_init_process_worker,
+            initargs=(env_class, agent_x, agent_o, coin_flip_start, collect_history),
+        ) as executor:
+            futures = []
+            for start_idx, end_idx in chunks:
+                slice_x = schedule_x[start_idx:end_idx]
+                slice_o = schedule_o[start_idx:end_idx]
+                futures.append(executor.submit(_process_worker_chunk, slice_x, slice_o))
 
-                    future = executor.submit(
-                        _play_episode_worker,
-                        env_class,
-                        agent_x,
-                        agent_o,
-                        coin_flip_start,
-                        collect_history,
-                        cache_context,
-                        disable_shared_cache,
-                        current_batch,
-                        start_eps_x,
-                        start_eps_o,
-                    )
-                    pending.add(future)
-                    submitted += current_batch
-
-                if not pending:
-                    break
-
-                finished = next(as_completed(pending))
-                pending.discard(finished)
-                try:
-                    batch_histories, q_delta_x, visit_delta_x, q_delta_o, visit_delta_o, episodes_run = finished.result()
-                except BaseException:
-                    stop = True
-                    for leftover in list(pending):
-                        leftover.cancel()
-                    raise
-
-                if collect_history and batch_histories:
-                    histories.extend(batch_histories)
-
-                agent_x.apply_deltas(q_delta_x, visit_delta_x)
-                agent_o.apply_deltas(q_delta_o, visit_delta_o)
-
-                completed += episodes_run
-                progress.update(episodes_run)
-
-                completed_eps_x = advance_epsilon(completed_eps_x, agent_x.epsilon_decay, agent_x.min_epsilon, episodes_run)
-                completed_eps_o = advance_epsilon(completed_eps_o, agent_o.epsilon_decay, agent_o.min_epsilon, episodes_run)
-                agent_x.epsilon = completed_eps_x
-                agent_o.epsilon = completed_eps_o
-
+            for future in as_completed(futures):
+                worker_histories, episodes_done = future.result()
+                completed += episodes_done
+                progress.update(episodes_done)
+                if collect_history and worker_histories:
+                    histories.extend(worker_histories)
                 if memory_limit_hit(process, memory_stop_threshold_mb):
-                    stop = True
-
-            if stop:
-                for leftover in list(pending):
-                    leftover.cancel()
+                    for pending in futures:
+                        if not pending.done():
+                            pending.cancel()
+                    break
     finally:
         progress.close()
 
-    agent_x.epsilon = completed_eps_x
-    agent_o.epsilon = completed_eps_o
+    def advance_epsilon(start_eps: float, decay: float, minimum: float, steps: int) -> float:
+        eps = start_eps
+        for _ in range(steps):
+            eps = max(minimum, eps * decay)
+        return eps
+
+    agent_x.epsilon = advance_epsilon(agent_x.epsilon, agent_x.epsilon_decay, agent_x.min_epsilon, completed)
+    agent_o.epsilon = advance_epsilon(agent_o.epsilon, agent_o.epsilon_decay, agent_o.min_epsilon, completed)
 
     return histories
 
 
 def _train_agents_sequential(
-    env,
-    agent_x,
-    agent_o,
+    env: GameEnv,
+    agent_x: BaseAgent,
+    agent_o: BaseAgent,
     episodes: int,
-    memory_stop_threshold_mb: Optional[int] = None,
-    process=None,
-    coin_flip_start: bool = False,
-    history_path: Optional[str] = None,
-    show_progress: bool = True,
+    *,
+    memory_stop_threshold_mb: Optional[int],
+    process,
+    coin_flip_start: bool,
+    collect_history: bool,
+    show_progress: bool,
 ) -> List[List[Dict[str, Any]]]:
-    all_histories: List[List[Dict[str, Any]]] = []
+    histories: List[List[Dict[str, Any]]] = []
     episode = 0
     with tqdm(total=episodes, ncols=80, desc="Training", disable=not show_progress) as progress_bar:
         while episode < episodes:
@@ -199,12 +249,12 @@ def _train_agents_sequential(
                 print("Memory threshold reached; stopping early.")
                 break
             try:
-                state_history, winner, stats = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
+                state_history, winner, _ = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
                 agent_x.learn_result(winner, state_history)
                 agent_o.learn_result(winner, state_history)
 
-                if history_path:
-                    all_histories.append(env.history.copy())
+                if collect_history:
+                    histories.append(env.history.copy())
 
                 episode += 1
                 agent_x.decay_epsilon()
@@ -216,15 +266,12 @@ def _train_agents_sequential(
                     print("Training cancelled by user.")
                     break
                 print("Resuming training...")
-            except Exception as e:
-                print(f"Error on episode {episode + 1}: {e}")
-                if env.history:
-                    all_histories.append(env.history.copy())
-                if history_path:
-                    print("Saving collected match histories before exiting...")
-                    Path(history_path).write_text(str(all_histories))
+            except Exception as exc:
+                print(f"Error on episode {episode + 1}: {exc}")
+                if env.history and collect_history:
+                    histories.append(env.history.copy())
                 raise
-    return all_histories
+    return histories
 
 
 def train_agents(
@@ -241,52 +288,38 @@ def train_agents(
     coin_flip_start: bool = False,
     parallel: bool = True,
     max_workers: Optional[int] = None,
-    disable_shared_cache: bool = False,
+    batch_size: Optional[int] = None,
 ):
     process = get_process() if memory_stop_threshold_mb else None
     all_histories: List[List[Dict[str, Any]]] = []
-    manager = None
-    cache_context: Optional[Dict[str, Any]] = None
+    collect_history = bool(history_path)
 
-    try:
-        if parallel:
-            if not disable_shared_cache:
-                manager = Manager()
-                cache_context = shared_cache.create_shared_context(manager)
-                shared_cache.install_context(cache_context)
-            else:
-                shared_cache.install_context(None)
-            all_histories = _train_agents_parallel(
-                env_class=type(env),
-                agent_x=agent_x,
-                agent_o=agent_o,
-                episodes=episodes,
-                coin_flip_start=coin_flip_start,
-                max_workers=max_workers,
-                show_progress=show_progress,
-                collect_history=bool(history_path),
-                memory_stop_threshold_mb=memory_stop_threshold_mb,
-                process=process,
-                cache_context=cache_context,
-                disable_shared_cache=disable_shared_cache,
-            )
-        else:
-            shared_cache.install_context(None)
-            all_histories = _train_agents_sequential(
-                env,
-                agent_x,
-                agent_o,
-                episodes,
-                memory_stop_threshold_mb,
-                process,
-                coin_flip_start,
-                history_path,
-                show_progress,
-            )
-    finally:
-        shared_cache.install_context(None)
-        if manager is not None:
-            manager.shutdown()
+    if parallel:
+        all_histories = _train_agents_parallel(
+            env_class=type(env),
+            agent_x=agent_x,
+            agent_o=agent_o,
+            episodes=episodes,
+            coin_flip_start=coin_flip_start,
+            max_workers=max_workers,
+            show_progress=show_progress,
+            collect_history=collect_history,
+            memory_stop_threshold_mb=memory_stop_threshold_mb,
+            process=process,
+            batch_size=batch_size,
+        )
+    else:
+        all_histories = _train_agents_sequential(
+            env,
+            agent_x,
+            agent_o,
+            episodes,
+            memory_stop_threshold_mb=memory_stop_threshold_mb,
+            process=process,
+            coin_flip_start=coin_flip_start,
+            collect_history=collect_history,
+            show_progress=show_progress,
+        )
 
     if history_path and all_histories:
         _download_training_data(all_histories, Path(history_path))

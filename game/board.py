@@ -2,7 +2,6 @@
 from typing import Any
 import numpy as np
 from enum import Enum
-from game.shared_cache import digest_bytes, get_cache
 
 
 
@@ -34,7 +33,7 @@ class TicTacToe9x9:
         
 
     def get_valid_moves(self):
-        return _cached_get_valid_moves(self.board.tobytes(), self.last_move, self.SIZE)
+        return _compute_valid_moves(self.board, self.last_move, self.SIZE)
 
     def make_move(self, row: int, col: int):
         if (row, col) not in self.get_valid_moves():
@@ -79,42 +78,28 @@ class TicTacToe9x9:
         return (Winner.ONGOING.value, None) if return_cells else Winner.ONGOING.value
 
     
-def _cached_get_valid_moves(
-    board_bytes: bytes,
+def _compute_valid_moves(
+    board: np.ndarray,
     last_move: tuple[int, int] | None,
     game_size: int,
 ) -> list[tuple[int, int]]:
-    cache = get_cache("valid_moves", allow_shared=False)
-    board_digest = digest_bytes(board_bytes)
-    move_key = last_move if last_move is not None else (-1, -1)
+    if last_move is None:
+        return [(r, c) for r in range(game_size) for c in range(game_size) if board[r, c] == 0]
 
-    def compute() -> tuple[tuple[int, int], ...]:
-        board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
-        if last_move is None:
-            # First move can go anywhere
-            return tuple((r, c) for r in range(game_size) for c in range(game_size))
+    r, c = last_move
+    valid: set[tuple[int, int]] = set()
 
-        r, c = last_move
-        valid = set()
+    directions = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
 
-        directions = [
-            (-1, -1), (-1, 0), (-1, 1),
-            (0, -1),           (0, 1),
-            (1, -1),  (1, 0),  (1, 1),
-        ]
+    for dr, dc in directions:
+        nr, nc = r + dr, c + dc
+        while 0 <= nr < game_size and 0 <= nc < game_size and board[nr, nc] == 0:
+            valid.add((nr, nc))
+            nr += dr
+            nc += dc
 
-        for dr, dc in directions:
-            nr, nc = r + dr, c + dc
-            while (
-                0 <= nr < game_size
-                and 0 <= nc < game_size
-                and board[nr, nc] == 0
-            ):
-                valid.add((nr, nc))
-                nr += dr
-                nc += dc
-
-        return tuple(valid)
-
-    result = cache.get_or_set((board_digest, move_key, game_size), compute)
-    return list(result)
+    return sorted(valid)

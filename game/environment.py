@@ -2,9 +2,9 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 from .board import TicTacToe9x9, Winner
-from .utils import print_board
+from .utils import print_board, encode_move
 from game.board import PlayerPiece
-from game.shared_cache import digest_bytes, get_cache
+from game.utils import encode_move
 
 
 Coord = Tuple[int, int]
@@ -78,7 +78,7 @@ class GameEnv:
     def get_state_hash(self):
         """Return a hashable representation of the current state for use as a key in Q-tables."""
         board, player, last_move = self.get_state()
-        return _cached_make_hashable(board.tobytes(), player, self.game.SIZE, last_move)
+        return _make_hashable(board, player, self.game.SIZE, last_move)
 
     def get_board(self):
         """Return a copy of the underlying board array (read-only from caller POV)."""
@@ -422,24 +422,16 @@ class GameEnv:
 # ----------------------------
 #       cache methods
 # ----------------------------
-def _cached_make_hashable(
-    board_bytes: bytes,
+def _make_hashable(
+    board: np.ndarray,
     player: int,
     game_size: int,
     last_move: Optional[Coord]
-) -> Tuple[str, int, Coord]:
-    cache = get_cache("state_hash")
-    board_digest = digest_bytes(board_bytes)
-    move_key = last_move if last_move is not None else (-1, -1)
-
-    def compute() -> Tuple[str, int, Coord]:
-        board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size))
-        canonical_board, canonical_move = canonicalize_board_and_move(board, last_move)
-        flat = "".join(str(int(x) if x >= 0 else 2) for x in canonical_board.flatten())
-        lm = canonical_move if canonical_move is not None else (-1, -1)
-        return (flat, player, lm)
-
-    return cache.get_or_set((board_digest, player, game_size, move_key), compute)
+) -> Tuple[bytes, int, int]:
+    canonical_board, canonical_move = canonicalize_board_and_move(board, last_move)
+    canonical_bytes = np.asarray(canonical_board, dtype=np.int8).tobytes()
+    lm = encode_move(canonical_move, game_size)
+    return canonical_bytes, player, lm
 
 
 
@@ -521,35 +513,6 @@ def flip_lr(b: Board) -> Board:
 
 def flip_ud(b: Board) -> Board:
     return np.flipud(b)
-
-def _cached_is_winning_move(
-    board_bytes: bytes,
-    move: tuple[int,int],
-    player: int,
-    game_size: int,
-    win_len: int,
-    turn_count: int
-) -> bool:
-    cache = get_cache("winning_move")
-    board_digest = digest_bytes(board_bytes)
-
-    def compute() -> bool:
-        board = np.frombuffer(board_bytes, dtype=int).reshape((game_size, game_size)).copy()
-        board[move] = player
-        return _did_last_move_win(
-            last_player=player,
-            last_move=move,
-            board=board,
-            turn_count=turn_count,
-            win_len=win_len,
-            size=game_size,
-            lines_by_cell=LINES_BY_CELL,
-        )
-
-    key = (board_digest, move, player, game_size, win_len, turn_count)
-    return cache.get_or_set(key, compute)
-
-
 
 def evaluate_after_move(
     last_player: int,
