@@ -1,5 +1,5 @@
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,28 +21,44 @@ _WORKER_AGENT_X_INSTANCE: Optional[BaseAgent] = None
 _WORKER_AGENT_O_INSTANCE: Optional[BaseAgent] = None
 _WORKER_COIN_FLIP = False
 _WORKER_COLLECT_HISTORY = False
+_WORKER_SELF_PLAY = False
 
 
-def _init_process_worker(env_class, agent_template_x, agent_template_o, coin_flip_start, collect_history):
+def _init_process_worker(
+    env_class,
+    agent_template_x,
+    agent_template_o,
+    coin_flip_start,
+    collect_history,
+    self_play,
+):
     global _WORKER_ENV_CLASS, _WORKER_AGENT_TEMPLATE_X, _WORKER_AGENT_TEMPLATE_O
     global _WORKER_ENV_INSTANCE, _WORKER_AGENT_X_INSTANCE, _WORKER_AGENT_O_INSTANCE
-    global _WORKER_COIN_FLIP, _WORKER_COLLECT_HISTORY
+    global _WORKER_COIN_FLIP, _WORKER_COLLECT_HISTORY, _WORKER_SELF_PLAY
 
     _WORKER_ENV_CLASS = env_class
     _WORKER_AGENT_TEMPLATE_X = agent_template_x
     _WORKER_AGENT_TEMPLATE_O = agent_template_o
     _WORKER_COIN_FLIP = coin_flip_start
     _WORKER_COLLECT_HISTORY = collect_history
+    _WORKER_SELF_PLAY = self_play
 
     _WORKER_ENV_INSTANCE = None
     _WORKER_AGENT_X_INSTANCE = None
     _WORKER_AGENT_O_INSTANCE = None
 
 
-def _process_worker_chunk(schedule_x: List[float], schedule_o: List[float]) -> tuple[List[List[Dict[str, Any]]], int]:
+def _process_worker_chunk(
+    schedule_x: List[float],
+    schedule_o: List[float],
+) -> tuple[List[List[Dict[str, Any]]], int]:
     global _WORKER_ENV_INSTANCE, _WORKER_AGENT_X_INSTANCE, _WORKER_AGENT_O_INSTANCE
 
-    if _WORKER_ENV_CLASS is None or _WORKER_AGENT_TEMPLATE_X is None or _WORKER_AGENT_TEMPLATE_O is None:
+    if (
+        _WORKER_ENV_CLASS is None
+        or _WORKER_AGENT_TEMPLATE_X is None
+        or _WORKER_AGENT_TEMPLATE_O is None
+    ):
         raise RuntimeError("Worker not initialised")
 
     if _WORKER_ENV_INSTANCE is None:
@@ -73,7 +89,8 @@ def _process_worker_chunk(schedule_x: List[float], schedule_o: List[float]) -> t
         )
 
         agent_x.learn_result(winner, state_history)
-        agent_o.learn_result(winner, state_history)
+        if not _WORKER_SELF_PLAY:
+            agent_o.learn_result(winner, state_history)
 
         if _WORKER_COLLECT_HISTORY:
             local_histories.append(env.history.copy())
@@ -81,7 +98,21 @@ def _process_worker_chunk(schedule_x: List[float], schedule_o: List[float]) -> t
     return local_histories, len(schedule_x)
 
 
-def _estimate_backend_capacity(episodes: int) -> int:
+def _estimate_backend_capacity(
+    episodes: int,
+    *,
+    max_actions: int,
+    memory_limit_mb: Optional[int],
+) -> int:
+    if memory_limit_mb:
+        capacity = SharedActionValueBackend.capacity_for_memory(memory_limit_mb, max_actions)
+        if capacity <= 0:
+            raise RuntimeError(
+                "Shared backend memory threshold is too small to allocate any state slots; "
+                "increase the threshold or disable parallel training."
+            )
+        return capacity
+
     estimated_states = episodes * 18
     baseline = 200_000
     cap = max(baseline, estimated_states)
@@ -95,6 +126,21 @@ def _ensure_shared_backend(
     capacity: int,
     max_actions: int,
 ) -> None:
+    if agent_x is agent_o:
+        if not agent_x.uses_shared_backend():
+            try:
+                shared_backend = SharedActionValueBackend.create(
+                    capacity=capacity,
+                    max_actions=max_actions,
+                )
+            except (MemoryError, BufferError, OSError) as exc:
+                raise RuntimeError(
+                    "Failed to allocate shared Q-table backing store for training. "
+                    "Reduce the memory threshold or run sequentially."
+                ) from exc
+            agent_x.use_shared_backend(shared_backend, own=True)
+        return
+
     shared_backend = None
     if agent_x.uses_shared_backend():
         shared_backend = agent_x.get_shared_backend()
@@ -102,7 +148,16 @@ def _ensure_shared_backend(
         shared_backend = agent_o.get_shared_backend()
 
     if shared_backend is None:
-        shared_backend = SharedActionValueBackend.create(capacity=capacity, max_actions=max_actions)
+        try:
+            shared_backend = SharedActionValueBackend.create(
+                capacity=capacity,
+                max_actions=max_actions,
+            )
+        except (MemoryError, BufferError, OSError) as exc:
+            raise RuntimeError(
+                "Failed to allocate shared Q-table backing store for parallel training. "
+                "Reduce the memory threshold or run sequentially."
+            ) from exc
         agent_x.use_shared_backend(shared_backend, own=True)
         agent_o.use_shared_backend(shared_backend.fork(), own=False)
         return
@@ -111,7 +166,6 @@ def _ensure_shared_backend(
         agent_x.use_shared_backend(shared_backend.fork(), own=False)
     if not agent_o.uses_shared_backend():
         agent_o.use_shared_backend(shared_backend.fork(), own=False)
-
 
 
 def _train_agents_parallel(
@@ -127,16 +181,24 @@ def _train_agents_parallel(
     memory_stop_threshold_mb: Optional[int],
     process,
     batch_size: Optional[int],
+    self_play: bool,
 ) -> List[List[Dict[str, Any]]]:
     if episodes <= 0:
         return []
 
     size_hint = getattr(env_class, "SIZE", 9)
+    max_actions = size_hint * size_hint
+    capacity = _estimate_backend_capacity(
+        episodes,
+        max_actions=max_actions,
+        memory_limit_mb=memory_stop_threshold_mb,
+    )
+
     _ensure_shared_backend(
         agent_x,
         agent_o,
-        capacity=_estimate_backend_capacity(episodes),
-        max_actions=size_hint * size_hint,
+        capacity=capacity,
+        max_actions=max_actions,
     )
 
     if max_workers:
@@ -156,6 +218,7 @@ def _train_agents_parallel(
             coin_flip_start=coin_flip_start,
             collect_history=collect_history,
             show_progress=show_progress,
+            self_play=self_play,
         )
         return histories
 
@@ -169,7 +232,10 @@ def _train_agents_parallel(
             eps = max(agent.min_epsilon, eps * agent.epsilon_decay)
 
     build_schedule(agent_x, schedule_x)
-    build_schedule(agent_o, schedule_o)
+    if self_play:
+        schedule_o = list(schedule_x)
+    else:
+        build_schedule(agent_o, schedule_o)
 
     if batch_size is not None and batch_size > 0:
         chunk_size = batch_size
@@ -190,32 +256,69 @@ def _train_agents_parallel(
 
     mp_ctx = get_context("spawn")
 
+    executor: Optional[ProcessPoolExecutor] = None
+    futures: List[Future] = []
+    stop_requested = False
+    memory_triggered = False
+    memory_triggered_reason = "Memory threshold reached; stopping training early."
+
     try:
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=worker_count,
             mp_context=mp_ctx,
             initializer=_init_process_worker,
-            initargs=(env_class, agent_x, agent_o, coin_flip_start, collect_history),
-        ) as executor:
-            futures = []
-            for start_idx, end_idx in chunks:
-                slice_x = schedule_x[start_idx:end_idx]
-                slice_o = schedule_o[start_idx:end_idx]
-                futures.append(executor.submit(_process_worker_chunk, slice_x, slice_o))
+            initargs=(env_class, agent_x, agent_o, coin_flip_start, collect_history, self_play),
+        )
 
-            for future in as_completed(futures):
+        for start_idx, end_idx in chunks:
+            slice_x = schedule_x[start_idx:end_idx]
+            slice_o = schedule_o[start_idx:end_idx]
+            futures.append(executor.submit(_process_worker_chunk, slice_x, slice_o))
+
+        for future in as_completed(futures):
+            if stop_requested:
+                break
+            try:
                 worker_histories, episodes_done = future.result()
+            except CancelledError:
+                continue
+            except RuntimeError as exc:
+                if "Shared Q-table capacity exhausted" in str(exc):
+                    memory_triggered = True
+                    memory_triggered_reason = "Shared Q-table capacity exhausted; stopping training early."
+                    stop_requested = True
+                else:
+                    for pending in futures:
+                        if not pending.done():
+                            pending.cancel()
+                    raise
+            except Exception:
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                raise
+            else:
                 completed += episodes_done
                 progress.update(episodes_done)
                 if collect_history and worker_histories:
                     histories.extend(worker_histories)
+
                 if memory_limit_hit(process, memory_stop_threshold_mb):
-                    for pending in futures:
-                        if not pending.done():
-                            pending.cancel()
-                    break
+                    memory_triggered = True
+                    memory_triggered_reason = "Memory threshold reached; stopping training early."
+                    stop_requested = True
+
+            if stop_requested:
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                break
     finally:
         progress.close()
+        if memory_triggered:
+            print(memory_triggered_reason)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def advance_epsilon(start_eps: float, decay: float, minimum: float, steps: int) -> float:
         eps = start_eps
@@ -224,7 +327,8 @@ def _train_agents_parallel(
         return eps
 
     agent_x.epsilon = advance_epsilon(agent_x.epsilon, agent_x.epsilon_decay, agent_x.min_epsilon, completed)
-    agent_o.epsilon = advance_epsilon(agent_o.epsilon, agent_o.epsilon_decay, agent_o.min_epsilon, completed)
+    if not self_play:
+        agent_o.epsilon = advance_epsilon(agent_o.epsilon, agent_o.epsilon_decay, agent_o.min_epsilon, completed)
 
     return histories
 
@@ -240,8 +344,13 @@ def _train_agents_sequential(
     coin_flip_start: bool,
     collect_history: bool,
     show_progress: bool,
+    self_play: bool,
 ) -> List[List[Dict[str, Any]]]:
     histories: List[List[Dict[str, Any]]] = []
+    opponent = agent_o
+    if self_play:
+        opponent = agent_x.fork_shared()
+
     episode = 0
     with tqdm(total=episodes, ncols=80, desc="Training", disable=not show_progress) as progress_bar:
         while episode < episodes:
@@ -249,17 +358,25 @@ def _train_agents_sequential(
                 print("Memory threshold reached; stopping early.")
                 break
             try:
-                state_history, winner, _ = run_episode(env, agent_x, agent_o, coin_flip_start=coin_flip_start)
+                if self_play:
+                    opponent.epsilon = agent_x.epsilon
+                state_history, winner, _ = run_episode(
+                    env,
+                    agent_x,
+                    opponent,
+                    coin_flip_start=coin_flip_start,
+                )
                 agent_x.learn_result(winner, state_history)
-                agent_o.learn_result(winner, state_history)
+                if not self_play:
+                    opponent.learn_result(winner, state_history)
 
                 if collect_history:
                     histories.append(env.history.copy())
 
                 episode += 1
                 agent_x.decay_epsilon()
-                agent_o.decay_epsilon()
-                progress_bar.update(1)
+                if not self_play:
+                    opponent.decay_epsilon()
             except KeyboardInterrupt:
                 choice = input("Training interrupted. Cancel training? [y/N]: ").strip().lower()
                 if choice in ("y", "yes"):
@@ -277,7 +394,7 @@ def _train_agents_sequential(
 def train_agents(
     env: GameEnv,
     agent_x: BaseAgent,
-    agent_o: BaseAgent,
+    agent_o: Optional[BaseAgent] = None,
     episodes: int = 1000,
     *,
     memory_stop_threshold_mb: Optional[int] = None,
@@ -289,16 +406,39 @@ def train_agents(
     parallel: bool = True,
     max_workers: Optional[int] = None,
     batch_size: Optional[int] = None,
+    self_play: bool = False,
 ):
+    if not self_play and agent_o is None:
+        raise ValueError("agent_o must be provided when self_play is False")
+
     process = get_process() if memory_stop_threshold_mb else None
     all_histories: List[List[Dict[str, Any]]] = []
     collect_history = bool(history_path)
+
+    opponent_agent = agent_o if agent_o is not None else agent_x
+
+    env_game = getattr(env, "game", None)
+    size_hint = getattr(env_game, "SIZE", getattr(type(env), "SIZE", 9))
+    max_actions = size_hint * size_hint
+
+    if parallel or self_play:
+        capacity = _estimate_backend_capacity(
+            episodes,
+            max_actions=max_actions,
+            memory_limit_mb=memory_stop_threshold_mb,
+        )
+        _ensure_shared_backend(
+            agent_x,
+            opponent_agent,
+            capacity=capacity,
+            max_actions=max_actions,
+        )
 
     if parallel:
         all_histories = _train_agents_parallel(
             env_class=type(env),
             agent_x=agent_x,
-            agent_o=agent_o,
+            agent_o=opponent_agent,
             episodes=episodes,
             coin_flip_start=coin_flip_start,
             max_workers=max_workers,
@@ -307,18 +447,20 @@ def train_agents(
             memory_stop_threshold_mb=memory_stop_threshold_mb,
             process=process,
             batch_size=batch_size,
+            self_play=self_play,
         )
     else:
         all_histories = _train_agents_sequential(
             env,
             agent_x,
-            agent_o,
+            opponent_agent,
             episodes,
             memory_stop_threshold_mb=memory_stop_threshold_mb,
             process=process,
             coin_flip_start=coin_flip_start,
             collect_history=collect_history,
             show_progress=show_progress,
+            self_play=self_play,
         )
 
     if history_path and all_histories:
@@ -326,27 +468,32 @@ def train_agents(
     if agent_x_save_path:
         _save_agent_snapshot(agent_x, agent_x_save_path)
     if agent_o_save_path:
-        _save_agent_snapshot(agent_o, agent_o_save_path)
+        if self_play:
+            print("Skipping separate save for opponent: self-play uses a single agent instance.")
+        else:
+            _save_agent_snapshot(opponent_agent, agent_o_save_path)
 
     return all_histories
 
 
-def _download_training_data(all_histories: list[list[dict[str, Any]]], history_path: Path):
+def _download_training_data(all_histories: List[List[Dict[str, Any]]], history_path: Path):
     import json
     import zipfile
 
     history_path = Path(history_path)
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(history_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+    with zipfile.ZipFile(history_path, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
         for i, history in enumerate(all_histories):
             serialized = []
             for entry in history:
                 move = entry.get("move")
-                serialized.append({
-                    "player": entry.get("player"),
-                    "move": list(move) if move is not None else None,
-                })
+                serialized.append(
+                    {
+                        "player": entry.get("player"),
+                        "move": list(move) if move is not None else None,
+                    }
+                )
             json_bytes = json.dumps(serialized, ensure_ascii=False, indent=2).encode("utf-8")
             zipf.writestr(f"episode_{i + 1}.json", json_bytes)
 

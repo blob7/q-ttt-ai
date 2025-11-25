@@ -65,7 +65,7 @@ class BaseAgent(ABC):
     # --- Action selection (epsilon-greedy) ---
     def choose_action(self, env: GameEnv, learn: bool = True):
         """Select action using epsilon-greedy strategy with lazy Q-value initialization."""
-        state_hash = env.get_state_hash()
+        state_hash, move_to_canonical, _ = env.get_canonical_state()
         with self._lock_context():
             state_q_snapshot = self._get_state_q_snapshot(state_hash)
         verbose = False  # Set to True to see action selection details
@@ -74,6 +74,10 @@ class BaseAgent(ABC):
             print(f"Choosing action for state: {state_hash} | turn {env.game.turn_count}")
             print(f"Q-values: {state_q_snapshot}")
         valid_moves = env.get_valid_moves()
+        canonical_for_move: Dict[tuple[int, int], tuple[int, int]] = {
+            move: move_to_canonical(move)
+            for move in valid_moves
+        }
 
         safety_move, safe_moves = env.safety_net_choices()
         selected_move = None
@@ -92,7 +96,12 @@ class BaseAgent(ABC):
                 best_move = None
                 best_value = float('-inf')
                 for move in eligible_moves:
-                    q = state_q_snapshot.get(move, 0.0)
+                    canonical_move = canonical_for_move[move]
+                    q = state_q_snapshot.get(canonical_move)
+                    if q is None and canonical_move != move:
+                        q = state_q_snapshot.get(move)
+                    if q is None:
+                        q = 0.0
                     if q > best_value:
                         best_move = move
                         best_value = q

@@ -1,8 +1,8 @@
 # game/environment.py
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Literal, overload
 import numpy as np
 from .board import TicTacToe9x9, Winner
-from .utils import print_board, encode_move
+from .utils import print_board
 from game.board import PlayerPiece
 from game.utils import encode_move
 
@@ -52,7 +52,7 @@ class GameEnv:
     def __init__(self):
         self.game = TicTacToe9x9()
         self.history: List[Dict[str, Any]] = [] # list of {player: PlayerPiece.value, move: (row, col), board: np.ndarray}
-        self.state_history: List[Dict[str, Any]] = [] # list of {state: hash(board, current_player), action: (row, col)}
+        self.state_history: List[Dict[str, Any]] = [] # list of {state: canonical hash, action: canonical (row, col), raw_action: original move}
 
         # index into history that represents the current state. -1 means
         # no moves have been played (history empty). When jumping back in
@@ -77,8 +77,21 @@ class GameEnv:
     
     def get_state_hash(self):
         """Return a hashable representation of the current state for use as a key in Q-tables."""
+        state_key, _, _ = self.get_canonical_state()
+        return state_key
+
+    def get_canonical_state(
+        self,
+    ) -> tuple[tuple[bytes, int, int], Callable[[Coord], Coord], Callable[[Coord], Coord]]:
         board, player, last_move = self.get_state()
-        return _make_hashable(board, player, self.game.SIZE, last_move)
+        canonical_board, canonical_move, move_to_canonical, move_from_canonical = canonicalize_board_and_move(
+            board,
+            last_move,
+            return_transform=True,
+        )
+        canonical_bytes = np.asarray(canonical_board, dtype=np.int8).tobytes()
+        encoded_last_move = encode_move(canonical_move, self.game.SIZE)
+        return (canonical_bytes, player, encoded_last_move), move_to_canonical, move_from_canonical
 
     def get_board(self):
         """Return a copy of the underlying board array (read-only from caller POV)."""
@@ -92,7 +105,8 @@ class GameEnv:
     def step(self, action: tuple[int, int]) -> tuple[Any, bool, int | Any]:
         """Perform one move, record it, and return (state, done, winner)."""
         row, col = action
-        last_state_h = self.get_state_hash()
+        last_state_h, move_to_canonical, _ = self.get_canonical_state()
+        canonical_action = move_to_canonical((row, col))
         valid = self.game.make_move(row, col)
 
         if not valid:
@@ -119,7 +133,8 @@ class GameEnv:
 
         self.state_history.append({
             "state": last_state_h,
-            "action": (row, col)
+            "action": canonical_action,
+            "raw_action": (row, col),
         })
 
             
@@ -435,47 +450,88 @@ def _make_hashable(
 
 
 
+
+@overload
 def canonicalize_board_and_move(
     board: Board,
-    last_move: Optional[Coord]
+    last_move: Optional[Coord],
 ) -> Tuple[Board, Optional[Coord]]:
+    ...
+
+
+@overload
+def canonicalize_board_and_move(
+    board: Board,
+    last_move: Optional[Coord],
+    *,
+    return_transform: Literal[False] = False,
+) -> Tuple[Board, Optional[Coord]]:
+    ...
+
+
+@overload
+def canonicalize_board_and_move(
+    board: Board,
+    last_move: Optional[Coord],
+    *,
+    return_transform: Literal[True],
+) -> Tuple[Board, Optional[Coord], Callable[[Coord], Coord], Callable[[Coord], Coord]]:
+    ...
+
+
+def canonicalize_board_and_move(
+    board: Board,
+    last_move: Optional[Coord],
+    *,
+    return_transform: bool = False,
+) -> Tuple[Board, Optional[Coord]] | Tuple[Board, Optional[Coord], Callable[[Coord], Coord], Callable[[Coord], Coord]]:
     """Return canonical board and move using D4 symmetries."""
-    
+
     size = board.shape[0]
 
     best_key = None
     best_board = None
     best_move = None
+    best_move_to = None
+    best_move_from = None
 
-    for board_tf, move_tf in d4_transforms(size):
-        
-        b2 = board_tf(board)
+    for board_tf, move_to_tf, move_from_tf in d4_transforms(size):
+        transformed_board = board_tf(board)
 
         # Flatten key used for lexicographic comparison
-        key = tuple(int(x) for x in b2.flatten())
-        
+        key = tuple(int(x) for x in transformed_board.flatten())
+
         if best_key is None or key < best_key:
             best_key = key
-            best_board = b2
+            best_board = transformed_board
+            best_move_to = move_to_tf
+            best_move_from = move_from_tf
 
             if last_move is not None:
-                best_move = move_tf(last_move)
+                best_move = move_to_tf(last_move)
             else:
                 best_move = None
 
-    assert best_board is not None
+    assert best_board is not None and best_move_to is not None and best_move_from is not None
+
+    if return_transform:
+        return best_board, best_move, best_move_to, best_move_from
+
     return best_board, best_move
 
 
 
 def d4_transforms(size: int):
     """Return 8 board and move transforms of the D4 symmetry group."""
-    
-    def rotate_move(coord: Coord, k: int) -> Coord:
+
+    def rotate(coord: Coord, k: int) -> Coord:
         r, c = coord
         for _ in range(k % 4):
             r, c = size - 1 - c, r
         return r, c
+
+    def rotate_board(b: Board, k: int) -> Board:
+        return np.rot90(b, k)
 
     def flip_lr_move(coord: Coord) -> Coord:
         r, c = coord
@@ -485,24 +541,35 @@ def d4_transforms(size: int):
         r, c = coord
         return size - 1 - r, c
 
+    def reflect_anti_move(coord: Coord) -> Coord:
+        r, c = coord
+        return size - 1 - c, size - 1 - r
+
+    def reflect_anti_board(b: Board) -> Board:
+        return np.rot90(b, 1).T
+
     # 1. Identity
-    yield (lambda b: b, lambda m: m)
+    yield (lambda b: b, lambda m: m, lambda m: m)
 
     # 2–4. Rot90, Rot180, Rot270
     for k in (1, 2, 3):
-        yield (lambda b, k=k: rot90(b, k), lambda m, k=k: rotate_move(m, k))
+        yield (
+            lambda b, k=k: rotate_board(b, k),
+            lambda m, k=k: rotate(m, k),
+            lambda m, k=k: rotate(m, 4 - (k % 4)),
+        )
 
     # 5. Reflect (vertical flip)
-    yield (flip_lr, lambda m: flip_lr_move(m))
+    yield (flip_lr, flip_lr_move, flip_lr_move)
 
     # 6. Reflect (horizontal flip)
-    yield (flip_ud, lambda m: flip_ud_move(m))
+    yield (flip_ud, flip_ud_move, flip_ud_move)
 
     # 7. Reflect across main diagonal (transpose)
-    yield (lambda b: b.T, lambda m: (m[1], m[0]))
+    yield (lambda b: b.T, lambda m: (m[1], m[0]), lambda m: (m[1], m[0]))
 
     # 8. Reflect across anti-diagonal
-    yield (lambda b: rot90(b, 1).T, lambda m: rotate_move((m[1], m[0]), 3))
+    yield (reflect_anti_board, reflect_anti_move, reflect_anti_move)
 
 
 def rot90(b: Board, k: int) -> Board:

@@ -31,6 +31,7 @@ def main():
     controller2 = None
     coinflip_start = False
     starting_player = None
+    self_play_training = False
 
     if game_mode in (GameMode.PLAYER_V_BOT, GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
         player1, path1 = menu.select_agent_menu()
@@ -38,9 +39,18 @@ def main():
         controller1 = lambda env: bot1.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
         
         if game_mode in (GameMode.BOT_V_BOT, GameMode.TRAIN_AI, GameMode.COMPETE_BOT_VS_BOT):
-            player2, path2 = menu.select_agent_menu()
-            bot2 = load_agent(player2, role=PlayerPiece.O.value, path=path2)
-            controller2 = lambda env: bot2.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
+            if game_mode == GameMode.TRAIN_AI:
+                self_play_training = menu.ask_self_play_training()
+
+            need_second_agent = not (game_mode == GameMode.TRAIN_AI and self_play_training)
+
+            if need_second_agent:
+                player2, path2 = menu.select_agent_menu()
+                bot2 = load_agent(player2, role=PlayerPiece.O.value, path=path2)
+                controller2 = lambda env: bot2.choose_action(env, learn=game_mode == GameMode.TRAIN_AI)
+            else:
+                bot2 = bot1
+                controller2 = controller1
 
     
         starting_player = menu.select_starting_player_menu(
@@ -70,7 +80,7 @@ def main():
         # Non-GUI setup for training or competition
         env = GameEnv()
         if game_mode == GameMode.TRAIN_AI:
-            training_params = menu.select_training_parameters_menu()
+            training_params = menu.select_training_parameters_menu(self_play=self_play_training)
             train_agents(
                 env=env, 
                 agent_x=bot1, 
@@ -82,6 +92,7 @@ def main():
                 show_progress=training_params["show_progress"],
                 coin_flip_start=coinflip_start,
                 parallel=training_params['parallel'],
+                self_play=training_params["self_play"],
             )
         elif game_mode == GameMode.COMPETE_BOT_VS_BOT:
             competition_params = menu.select_competition_parameters_menu()
@@ -109,9 +120,13 @@ def load_agent(agent_choice: menu.AgentChoice, role: int, path: Optional[str]) -
         raise ValueError(f"Invalid agent choice: {agent_choice}")
 
 if __name__ == "__main__":
-    profiler = cProfile.Profile()
-    profiler.enable()
-    main()
-    profiler.disable()
-    stats = pstats.Stats(profiler).sort_stats('cumtime')
-    stats.print_stats(20)  # Print top 20 functions by cumulative time
+    do_profile = False  # Set to True to enable profiling
+    if do_profile:
+        profiler = cProfile.Profile()
+        profiler.enable()
+        main()
+        profiler.disable()
+        stats = pstats.Stats(profiler).sort_stats('cumtime')
+        stats.print_stats(20)  # Print top 20 functions by cumulative time
+    else:
+        main()

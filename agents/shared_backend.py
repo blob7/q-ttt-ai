@@ -69,7 +69,7 @@ class SharedActionValueBackend:
                 "action_count": SharedSegment(f"{prefix}_act", (capacity,), np.int16, 0),
                 "canonical": SharedSegment(f"{prefix}_can", (capacity, BOARD_CELLS), np.int8, 0),
                 "action_keys": SharedSegment(f"{prefix}_akey", (capacity, max_actions), np.int16, -1),
-                "q_values": SharedSegment(f"{prefix}_qval", (capacity, max_actions), np.float32, 0.0),
+                "q_values": SharedSegment(f"{prefix}_qval", (capacity, max_actions), np.float16, 0.0),
                 "visit_counts": SharedSegment(f"{prefix}_vct", (capacity, max_actions), np.int32, 0),
             }
             context["segments"] = {name: seg.name for name, seg in segments.items()}
@@ -122,7 +122,7 @@ class SharedActionValueBackend:
         if key == "action_keys":
             return (np.int16, (self.capacity, self.max_actions))
         if key == "q_values":
-            return (np.float32, (self.capacity, self.max_actions))
+            return (np.float16, (self.capacity, self.max_actions))
         if key == "visit_counts":
             return (np.int32, (self.capacity, self.max_actions))
         raise KeyError(key)
@@ -136,6 +136,33 @@ class SharedActionValueBackend:
         lock_count: int = 2048,
     ) -> "SharedActionValueBackend":
         return cls(capacity=capacity, max_actions=max_actions, lock_count=lock_count, create=True)
+
+    @staticmethod
+    def bytes_per_state(max_actions: int) -> int:
+        base = (
+            np.dtype(np.uint8).itemsize  # used flag
+            + np.dtype(np.uint64).itemsize * 2  # hash parts
+            + np.dtype(np.int8).itemsize  # player
+            + np.dtype(np.int32).itemsize  # last_move
+            + np.dtype(np.int16).itemsize  # action_count
+            + np.dtype(np.int8).itemsize * BOARD_CELLS  # canonical board
+        )
+        per_action = (
+            np.dtype(np.int16).itemsize  # action key
+            + np.dtype(np.float16).itemsize  # q value
+            + np.dtype(np.int32).itemsize  # visit count
+        )
+        return base + per_action * max_actions
+
+    @staticmethod
+    def capacity_for_memory(memory_mb: int, max_actions: int, *, safety_margin: float = 0.9) -> int:
+        if memory_mb <= 0:
+            return 0
+        bytes_total = int(memory_mb * 1024 * 1024 * safety_margin)
+        per_state = SharedActionValueBackend.bytes_per_state(max_actions)
+        if per_state <= 0:
+            return 0
+        return max(8, bytes_total // per_state)
 
     def fork(self) -> "SharedActionValueBackend":
         context = {
@@ -342,7 +369,7 @@ class SharedActionValueBackend:
         for idx in range(self.capacity):
             if not self.state_used[idx]:
                 continue
-            board_bytes = bytes(self.state_canonical[idx].tolist())
+            board_bytes = self.state_canonical[idx].tobytes()
             player = int(self.state_player[idx])
             last_move = int(self.state_last_move[idx])
             key = (board_bytes, player, last_move)
@@ -360,7 +387,7 @@ class SharedActionValueBackend:
         for idx in range(self.capacity):
             if not self.state_used[idx]:
                 continue
-            board_bytes = bytes(self.state_canonical[idx].tolist())
+            board_bytes = self.state_canonical[idx].tobytes()
             player = int(self.state_player[idx])
             last_move = int(self.state_last_move[idx])
             yield idx, (board_bytes, player, last_move)

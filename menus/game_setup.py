@@ -19,6 +19,11 @@ class AgentChoice(Enum):
     DECAY_Q_AGENT = "Decay Q-Learning Agent"
     PURE_RANDOM_AGENT = "Pure Random Agent"
 
+
+def ask_self_play_training() -> bool:
+    return q.confirm("Train the first agent against itself?").ask()
+
+
 def select_agent_menu() -> Tuple[AgentChoice, Optional[str]]:
     choice = q.select(
         "Select an agent:",
@@ -39,25 +44,32 @@ def select_starting_player_menu(player1: str, player2: str) -> str:
     ).ask()
     return choice
 
-def select_training_parameters_menu() -> dict:
+def select_training_parameters_menu(self_play: bool = False) -> dict:
     episodes = q.text("Enter the number of training episodes:", default="100_000").ask()
     memory_threshold = q.text("Enter memory stop threshold in MB:", default="16_000").ask()
     
     agent_x_save_path = q.text("Enter the file name to save the first trained agent (leave blank for none):", default="").ask()
     agent_x_save_path = "data/saved_agents/" + agent_x_save_path + ".pkl" if agent_x_save_path else None
-    agent_o_save_path = q.text("Enter the file name to save the second trained agent (leave blank for none):", default="").ask()
-    agent_o_save_path = "data/saved_agents/" + agent_o_save_path + ".pkl" if agent_o_save_path else None
+    if self_play:
+        agent_o_save_path = None
+    else:
+        agent_o_save_path = q.text("Enter the file name to save the second trained agent (leave blank for none):", default="").ask()
+        agent_o_save_path = "data/saved_agents/" + agent_o_save_path + ".pkl" if agent_o_save_path else None
     
     show_progress = q.confirm("Do you want to show training progress?").ask()
     parallel = q.confirm("Do you want to train in parallel?").ask()
     
+    def _parse_int(value: str) -> int:
+        return int(value.replace("_", "").strip())
+
     return {
-        "episodes": int(episodes),
-        "memory_stop_threshold_mb": int(memory_threshold),
+        "episodes": _parse_int(episodes),
+        "memory_stop_threshold_mb": _parse_int(memory_threshold),
         "agent_x_save_path": agent_x_save_path,
         "agent_o_save_path": agent_o_save_path,
         "show_progress": show_progress,
         "parallel": parallel,
+        "self_play": self_play,
     }
 
 def select_competition_parameters_menu() -> dict:
