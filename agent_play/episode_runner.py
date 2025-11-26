@@ -31,7 +31,8 @@ def run_episode(env: GameEnv, agent_x: BaseAgent, agent_o: BaseAgent, coin_flip_
                     'winning_player': first_agent.name,
                     'winning_piece': first_agent.role,
                     'turns': env.game.turn_count,
-                    'last_move': action
+                    'last_move': action,
+                    'moves': [entry["move"] for entry in env.history],
                 }
             return env.state_history, winner, stats
 
@@ -42,7 +43,8 @@ def run_episode(env: GameEnv, agent_x: BaseAgent, agent_o: BaseAgent, coin_flip_
             'winning_player': None,
             'winning_piece': None,
             'turns': env.game.turn_count,
-            'last_move': env.game.last_move
+            'last_move': env.game.last_move,
+            'moves': [entry["move"] for entry in env.history],
         }
     return env.state_history, None, stats
 

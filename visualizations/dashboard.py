@@ -21,6 +21,7 @@ class GameDashboard:
 
         # Create 2x2 figure (last subplot empty)
         self.fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        self.fig.subplots_adjust(wspace=0.5, hspace=0.5)
         axs[1, 1].axis('off')
 
         title_text = f"{self.display_name1} vs {self.display_name2} Dashboard"
@@ -74,7 +75,7 @@ class GameDashboard:
         draw = winner_key is None
 
         # Update plots
-        self.heatmap_plot.update(stats['last_move'])
+        self.heatmap_plot.update(stats.get('moves', []))
         self.cumulative_result_plot.update(p1_win, p2_win, draw)
         self.game_length_plot.update(stats['turns'])
         self.piece_breakdown_plot.update(p1_won_as_x, p1_won_as_o, p2_won_as_x, p2_won_as_o, draw)
