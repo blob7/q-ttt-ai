@@ -112,8 +112,12 @@ class TicTacToeGUI:
         elif winner == Winner.DRAW.value:
             text = "Draw!"
         else:
-            turn = "X" if self.env.current_player == PlayerPiece.X.value else "O"
-            text = f"Player {turn}'s turn"
+            valid_moves = self.env.get_valid_moves()
+            if not valid_moves:
+                text = "Draw!"
+            else:
+                turn = "X" if self.env.current_player == PlayerPiece.X.value else "O"
+                text = f"Player {turn}'s turn"
         self.status_label.config(text=text)
 
     def refresh_history(self):

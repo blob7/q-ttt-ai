@@ -18,13 +18,14 @@ class PureRandomAgent(BaseAgent):
     def choose_action(
         self, env: GameEnv, learn: bool = True, *, use_safety_net: bool = True
     ):
-        valid_moves = env.get_valid_moves()
         if use_safety_net:
             safety_move, safe_moves = env.safety_net_choices()
             if safety_move is not None:
                 return safety_move
             elif safe_moves:
                 return random.choice(safe_moves)
+        
+        valid_moves = env.get_valid_moves()
         return random.choice(valid_moves)
     
     def compute_reward(self, state, action, winner: int | None, mover, steps_from_end: int) -> float:
