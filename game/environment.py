@@ -13,9 +13,9 @@ Transform = Callable[[Board], Board]
 MoveTransform = Callable[[Coord, int], Coord]
 Line = List[Coord]
 
-def precompute_lines(size: int, win_len: int) -> dict[tuple[int, int], list[list[tuple[int, int]]]]:
+def precompute_lines(size: int, win_len: int) -> dict[Coord, list[Line]]:
     """Precompute all win_len-length lines that contain each cell."""
-    mapping: dict[tuple[int, int], list[list[tuple[int, int]]]] = {
+    mapping: dict[Coord, list[Line]] = {
         (r, c): [] for r in range(size) for c in range(size)
     }
 

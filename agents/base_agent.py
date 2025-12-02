@@ -9,8 +9,6 @@ import pickle
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-import numpy as np
-
 from agents.shared_backend import SharedActionValueBackend
 from game.board import PlayerPiece
 from game.environment import GameEnv
