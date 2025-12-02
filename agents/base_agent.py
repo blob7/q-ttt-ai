@@ -1,26 +1,26 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from contextlib import nullcontext
 import copy
 import math
 import random
 import pickle
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from agents.shared_backend import SharedActionValueBackend
 from game.board import PlayerPiece
 from game.environment import GameEnv
 from game.utils import decode_move, encode_move
 
+import sys
 
 def _state_q_factory():
     return defaultdict(float)
 
 
-def _state_visit_factory():
-    return defaultdict(int)
+ActionLike = int | tuple[int, int]
 
 class BaseAgent(ABC):   
     def __init__(
@@ -33,7 +33,6 @@ class BaseAgent(ABC):
         epsilon_decay: float = 0.995,
         *,
         q_values=None,
-        visit_counts=None,
         table_lock=None,
         shared_backend: Optional[SharedActionValueBackend] = None,
         shared_backend_owner: bool = False,
@@ -49,10 +48,10 @@ class BaseAgent(ABC):
         self._shared_backend: Optional[SharedActionValueBackend] = None
         self._shared_backend_owner = False
         default_q = q_values if q_values is not None else defaultdict(_state_q_factory)
-        default_visits = visit_counts if visit_counts is not None else defaultdict(_state_visit_factory)
-        self.configure_tables(default_q, default_visits, table_lock=self._table_lock)
+        self.configure_tables(default_q, table_lock=self._table_lock)
         if shared_backend is not None:
             self.use_shared_backend(shared_backend, own=shared_backend_owner)
+
 
     @property
     @abstractmethod
@@ -76,6 +75,15 @@ class BaseAgent(ABC):
             move: move_to_canonical(move)
             for move in valid_moves
         }
+        canonical_action_keys: Dict[tuple[int, int], int] = {
+            move: self._action_key(state_hash, canonical_move)
+            for move, canonical_move in canonical_for_move.items()
+        }
+        fallback_action_keys: Dict[tuple[int, int], int] = {
+            move: self._action_key(state_hash, move)
+            for move, canonical_move in canonical_for_move.items()
+            if canonical_move != move
+        }
 
         safety_move, safe_moves = env.safety_net_choices()
         selected_move = None
@@ -95,9 +103,12 @@ class BaseAgent(ABC):
                 best_value = float('-inf')
                 for move in eligible_moves:
                     canonical_move = canonical_for_move[move]
-                    q = state_q_snapshot.get(canonical_move)
-                    if q is None and canonical_move != move:
-                        q = state_q_snapshot.get(move)
+                    action_key = canonical_action_keys[move]
+                    q = state_q_snapshot.get(action_key)
+                    if q is None:
+                        fallback_key = fallback_action_keys.get(move)
+                        if fallback_key is not None:
+                            q = state_q_snapshot.get(fallback_key)
                     if q is None:
                         q = 0.0
                     if q > best_value:
@@ -158,7 +169,6 @@ class BaseAgent(ABC):
 
                 reward = self.compute_reward(state, action, winner, mover, reverse_idx)
                 self._increment_q_value(state, action, reward)
-                self._increment_visit_count(state, action)
 
 
     def save(self, file_path: str):
@@ -166,20 +176,18 @@ class BaseAgent(ABC):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if self.uses_shared_backend():
-            raw_q, _ = self._shared_backend.export_tables()  # type: ignore[union-attr]
-            q_values_dict: Dict[tuple[bytes, int, int], Dict[tuple[int, int], float]] = {}
-            for state, actions in raw_q.items():
-                decoded: Dict[tuple[int, int], float] = {}
-                for action_key, value in actions.items():
-                    try:
-                        move = self._decode_action(state, action_key)
-                    except ValueError:
-                        continue
-                    decoded[move] = value
-                if decoded:
-                    q_values_dict[state] = decoded
+            raw_q = self._shared_backend.export_tables()  # type: ignore[union-attr]
+            q_values_dict: Dict[tuple[bytes, int, int], Dict[int, float]] = {
+                state: {int(action_key): float(value) for action_key, value in actions.items()}
+                for state, actions in raw_q.items()
+                if actions
+            }
         else:
-            q_values_dict = {state: dict(actions) for state, actions in self._iter_mapping_items(self.q_values)}
+            q_values_dict: Dict[tuple[bytes, int, int], Dict[int, float]] = {}
+            for state, actions in self._iter_mapping_items(self.q_values):
+                snapshot = self._snapshot_action_values(state, actions, mutate=False)
+                if snapshot:
+                    q_values_dict[state] = snapshot
 
         with open(path, "wb") as f:
             pickle.dump({
@@ -203,17 +211,18 @@ class BaseAgent(ABC):
         agent.epsilon = data.get("epsilon", 0.2)
         agent.lr = data.get("lr", 0.1)
         agent.discount_factor = data.get("discount_factor", 0.9)
+
+        print(f"Agent loaded from {path}")
+        print(f'Q-Value Size after load: ', sys.getsizeof(agent.q_values), 'Bytes')
         return agent
     
-    def merge_q_tables(self, qtables, visit_tables):
-        """Weighted merge using visit counts."""
+    def merge_q_tables(self, qtables) -> None:
+        """Merge external Q-tables by overwriting with the latest values."""
         with self._lock_context():
-            for qtable, visits in zip(qtables, visit_tables):
+            for qtable in qtables:
                 for state, actions in qtable.items():
-                    visit_source = visits.get(state, {})
                     for action, value in actions.items():
-                        add_visits = visit_source.get(action, 0)
-                        self._merge_q_value(state, action, value, add_visits)
+                        self._merge_q_value(state, action, value)
 
     # ------------------
     # Internal helpers
@@ -221,18 +230,15 @@ class BaseAgent(ABC):
     def configure_tables(
         self,
         q_values,
-        visit_counts,
         *,
         table_lock=None,
     ) -> None:
         self.q_values = q_values
-        self.visit_counts = visit_counts
         self._table_lock = table_lock
         self._shared_backend = None
         self._shared_backend_owner = False
         self._track_deltas = False
         self._pending_q_deltas = defaultdict(_state_q_factory)
-        self._pending_visit_deltas = defaultdict(_state_visit_factory)
 
     def _lock_context(self):
         return self._table_lock if self._table_lock is not None else nullcontext()
@@ -265,6 +271,57 @@ class BaseAgent(ABC):
             raise ValueError("Encountered invalid action key for decoding")
         return move
 
+    def _action_key(self, state: tuple[bytes, int, int], action: ActionLike | None) -> int:
+        if isinstance(action, int):
+            return action
+        if action is None:
+            raise ValueError("Action cannot be None")
+        return self._encode_action(state, action)
+
+    def _ensure_int_action_keys(self, state: tuple[bytes, int, int], actions: MutableMapping) -> None:
+        if not actions:
+            return
+        removals: list = []
+        updates: list[tuple[int, object]] = []
+        for raw_key, value in list(actions.items()):
+            if isinstance(raw_key, int):
+                continue
+            try:
+                action_key = self._action_key(state, raw_key)
+            except ValueError:
+                removals.append(raw_key)
+                continue
+            removals.append(raw_key)
+            updates.append((action_key, value))
+        for raw_key in removals:
+            actions.pop(raw_key, None)
+        for action_key, value in updates:
+            actions[action_key] = value
+
+    def _snapshot_values(self, state: tuple[bytes, int, int], actions, *, mutate: bool, cast_fn: Callable[[object], object]) -> Dict[int, object]:
+        if mutate and isinstance(actions, MutableMapping):
+            self._ensure_int_action_keys(state, actions)
+            source = actions.items()
+        else:
+            source = actions.items()
+
+        snapshot: Dict[int, object] = {}
+        for raw_key, value in source:
+            if isinstance(raw_key, int):
+                key = int(raw_key)
+            else:
+                try:
+                    key = self._action_key(state, raw_key)
+                except ValueError:
+                    continue
+            snapshot[key] = cast_fn(value)
+        return snapshot
+
+    def _snapshot_action_values(self, state: tuple[bytes, int, int], actions, *, mutate: bool) -> Dict[int, float]:
+        cast: Callable[[object], float] = lambda v: float(v)
+        raw_snapshot = self._snapshot_values(state, actions, mutate=mutate, cast_fn=cast)
+        return {key: float(value) for key, value in raw_snapshot.items()}
+
     @staticmethod
     def _iter_mapping_items(table) -> list[tuple]:
         if isinstance(table, Mapping):
@@ -290,20 +347,13 @@ class BaseAgent(ABC):
             for state, actions in self._iter_mapping_items(self.q_values):
                 if not actions:
                     continue
-                for action, value in dict(actions).items():
-                    action_key = self._encode_action(state, action)
+                snapshot = self._snapshot_action_values(state, actions, mutate=False)
+                for action_key, value in snapshot.items():
                     backend.set_q_value(state, action_key, value)
-            for state, actions in self._iter_mapping_items(self.visit_counts):
-                if not actions:
-                    continue
-                for action, count in dict(actions).items():
-                    action_key = self._encode_action(state, action)
-                    backend.set_visit_count(state, action_key, count)
 
         self._shared_backend = backend
         self._shared_backend_owner = own
         self.q_values = backend
-        self.visit_counts = backend
         self.disable_delta_tracking()
 
     def close_shared_backend(self, *, unlink: bool = False) -> None:
@@ -319,47 +369,41 @@ class BaseAgent(ABC):
         clone._episode_transitions = []
         clone._track_deltas = False
         clone._pending_q_deltas = defaultdict(_state_q_factory)
-        clone._pending_visit_deltas = defaultdict(_state_visit_factory)
         clone._shared_backend_owner = False
         if self.uses_shared_backend():
             backend = self._shared_backend
             clone._shared_backend = backend.fork() if backend is not None else None
             clone.q_values = clone._shared_backend  # type: ignore[assignment]
-            clone.visit_counts = clone._shared_backend  # type: ignore[assignment]
         else:
             clone._shared_backend = None
             clone.q_values = self.q_values
-            clone.visit_counts = self.visit_counts
         return clone
 
     def enable_delta_tracking(self) -> None:
         with self._lock_context():
             self._track_deltas = True
             self._pending_q_deltas = defaultdict(_state_q_factory)
-            self._pending_visit_deltas = defaultdict(_state_visit_factory)
 
     def disable_delta_tracking(self) -> None:
         with self._lock_context():
             self._track_deltas = False
             self._pending_q_deltas = defaultdict(_state_q_factory)
-            self._pending_visit_deltas = defaultdict(_state_visit_factory)
 
-    def drain_deltas(self) -> tuple[Dict, Dict]:
+    def drain_deltas(self) -> Dict:
         with self._lock_context():
-            q_delta = {state: dict(actions) for state, actions in self._pending_q_deltas.items() if actions}
-            visit_delta = {state: dict(actions) for state, actions in self._pending_visit_deltas.items() if actions}
+            q_delta = {
+                state: self._snapshot_action_values(state, actions, mutate=True)
+                for state, actions in self._pending_q_deltas.items()
+                if actions
+            }
             self._pending_q_deltas = defaultdict(_state_q_factory)
-            self._pending_visit_deltas = defaultdict(_state_visit_factory)
-            return q_delta, visit_delta
+            return q_delta
 
-    def apply_deltas(self, q_delta: Dict, visit_delta: Dict) -> None:
+    def apply_deltas(self, q_delta: Dict) -> None:
         with self._lock_context():
             for state, actions in q_delta.items():
                 for action, delta in actions.items():
                     self._increment_q_value(state, action, delta, track=False)
-            for state, actions in visit_delta.items():
-                for action, inc in actions.items():
-                    self._increment_visit_count(state, action, inc, track=False)
 
     def _get_state_q_snapshot(self, state):
         if self.uses_shared_backend():
@@ -367,195 +411,148 @@ class BaseAgent(ABC):
             if backend is None:
                 return {}
             encoded = backend.get_state_q_snapshot(state)
-            if not encoded:
-                return {}
-            decoded: Dict[tuple[int, int], float] = {}
-            for action_key, value in encoded.items():
-                try:
-                    move = self._decode_action(state, action_key)
-                except ValueError:
-                    continue
-                decoded[move] = value
-            return decoded
+            return dict(encoded)
         if isinstance(self.q_values, defaultdict):
-            return dict(self.q_values[state])
+            state_actions = self.q_values[state]
+            if not state_actions:
+                return {}
+            return self._snapshot_action_values(state, state_actions, mutate=True)
+        if isinstance(self.q_values, MutableMapping):
+            state_actions = self.q_values.get(state)
+            if state_actions is None:
+                state_actions = _state_q_factory()
+                self.q_values[state] = state_actions
+            return self._snapshot_action_values(state, state_actions, mutate=True)
         if isinstance(self.q_values, Mapping):
-            return dict(self.q_values.get(state, {}))  # type: ignore[arg-type]
+            actions = self.q_values.get(state, {})  # type: ignore[arg-type]
+            if not actions:
+                return {}
+            return self._snapshot_action_values(state, dict(actions), mutate=False)
         return {}
 
     def _increment_q_value(self, state, action, delta, *, track: bool = True):
+        action_key = self._action_key(state, action)
         if self.uses_shared_backend():
             backend = self._shared_backend  # type: ignore[assignment]
             if backend is None:
                 return
-            action_key = self._encode_action(state, action)
             applied = backend.increment_q_value(state, action_key, delta, rounding=3)
             if track and getattr(self, "_track_deltas", False) and applied != 0.0:
                 pending = self._pending_q_deltas[state]
-                pending[action] = pending.get(action, 0.0) + applied
-                if pending[action] == 0.0:
-                    pending.pop(action, None)
+                if pending:
+                    self._ensure_int_action_keys(state, pending)
+                pending[action_key] = pending.get(action_key, 0.0) + applied
+                if pending[action_key] == 0.0:
+                    pending.pop(action_key, None)
                 if not pending:
                     self._pending_q_deltas.pop(state, None)
             return
 
+        replace_state_q = False
         if isinstance(self.q_values, defaultdict):
             state_q = self.q_values[state]
+        elif isinstance(self.q_values, MutableMapping):
+            state_q = self.q_values.get(state)
+            if state_q is None:
+                state_q = _state_q_factory()
+            replace_state_q = True
         elif isinstance(self.q_values, Mapping):
             state_q = dict(self.q_values.get(state, {}))  # type: ignore[arg-type]
-            self.q_values[state] = state_q  # type: ignore[index]
         else:
-            state_q = {}
+            state_q = _state_q_factory()
+            replace_state_q = isinstance(self.q_values, MutableMapping)
 
-        prev = state_q.get(action, 0.0)
+        if isinstance(state_q, MutableMapping):
+            self._ensure_int_action_keys(state, state_q)
+        else:
+            state_q = dict(state_q)
+            self._ensure_int_action_keys(state, state_q)
+            replace_state_q = replace_state_q or isinstance(self.q_values, MutableMapping)
+
+        prev = state_q.get(action_key, 0.0)
         new_value = round(prev + delta, 3)
-        state_q[action] = new_value
+        state_q[action_key] = new_value
+
+        if replace_state_q and isinstance(self.q_values, MutableMapping):
+            self.q_values[state] = state_q  # type: ignore[index]
 
         if track and getattr(self, "_track_deltas", False):
             pending = self._pending_q_deltas[state]
+            if pending:
+                self._ensure_int_action_keys(state, pending)
             applied = new_value - prev
-            pending[action] = pending.get(action, 0.0) + applied
-            if pending[action] == 0.0:
-                pending.pop(action, None)
-            if not pending:
-                self._pending_q_deltas.pop(state, None)
-
-    def _increment_visit_count(self, state, action, increment=1, *, track: bool = True):
-        if self.uses_shared_backend():
-            backend = self._shared_backend  # type: ignore[assignment]
-            if backend is None:
-                return
-            action_key = self._encode_action(state, action)
-            applied = backend.increment_visit_count(state, action_key, increment)
-            if track and getattr(self, "_track_deltas", False) and applied != 0:
-                pending = self._pending_visit_deltas[state]
-                pending[action] = pending.get(action, 0) + applied
-                if pending[action] == 0:
-                    pending.pop(action, None)
+            if applied != 0.0:
+                pending[action_key] = pending.get(action_key, 0.0) + applied
+                if pending[action_key] == 0.0:
+                    pending.pop(action_key, None)
                 if not pending:
-                    self._pending_visit_deltas.pop(state, None)
-            return
+                    self._pending_q_deltas.pop(state, None)
 
-        if isinstance(self.visit_counts, defaultdict):
-            state_visits = self.visit_counts[state]
-        elif isinstance(self.visit_counts, Mapping):
-            state_visits = dict(self.visit_counts.get(state, {}))  # type: ignore[arg-type]
-            self.visit_counts[state] = state_visits  # type: ignore[index]
-        else:
-            state_visits = {}
 
-        prev = state_visits.get(action, 0)
-        new_count = prev + increment
-        state_visits[action] = new_count
-
-        if track and getattr(self, "_track_deltas", False):
-            pending = self._pending_visit_deltas[state]
-            applied = new_count - prev
-            pending[action] = pending.get(action, 0) + applied
-            if pending[action] == 0:
-                pending.pop(action, None)
-            if not pending:
-                self._pending_visit_deltas.pop(state, None)
-
-    def _merge_q_value(self, state, action, value, added_visits):
-        if added_visits == 0:
-            return
+    def _merge_q_value(self, state, action, value):
+        action_key = self._action_key(state, action)
         if self.uses_shared_backend():
             backend = self._shared_backend  # type: ignore[assignment]
             if backend is None:
                 return
-            action_key = self._encode_action(state, action)
-            backend.merge_q_value(state, action_key, value, added_visits)
+            backend.set_q_value(state, action_key, value)
             return
-        if isinstance(self.q_values, defaultdict) and isinstance(self.visit_counts, defaultdict):
-            state_q = self.q_values[state]
-            state_visits = self.visit_counts[state]
-            current_visits = state_visits.get(action, 0)
-            total_visits = current_visits + added_visits
-            if total_visits == 0:
-                return
-            prev = state_q.get(action, 0.0)
-            state_q[action] = (prev * current_visits + value * added_visits) / total_visits
-            state_visits[action] = total_visits
-        elif isinstance(self.q_values, Mapping) and isinstance(self.visit_counts, Mapping):
-            state_q = dict(self.q_values.get(state, {}))  # type: ignore[arg-type]
-            state_visits = dict(self.visit_counts.get(state, {}))  # type: ignore[arg-type]
-            current_visits = state_visits.get(action, 0)
-            total_visits = current_visits + added_visits
-            if total_visits == 0:
-                self.q_values[state] = state_q  # type: ignore[index]
-                self.visit_counts[state] = state_visits  # type: ignore[index]
-                return
-            prev = state_q.get(action, 0.0)
-            state_q[action] = (prev * current_visits + value * added_visits) / total_visits
-            state_visits[action] = total_visits
-            self.q_values[state] = state_q  # type: ignore[index]
-            self.visit_counts[state] = state_visits  # type: ignore[index]
+        if isinstance(self.q_values, defaultdict):
+            target_table = self.q_values[state]
+        elif isinstance(self.q_values, MutableMapping):
+            target_table = self.q_values.get(state)
+            if target_table is None:
+                target_table = {}
+                self.q_values[state] = target_table  # type: ignore[index]
+        else:
+            return
+
+        if isinstance(target_table, MutableMapping):
+            self._ensure_int_action_keys(state, target_table)
+            target_table[action_key] = float(value)
+        else:
+            new_table = dict(target_table)
+            self._ensure_int_action_keys(state, new_table)
+            new_table[action_key] = float(value)
+            if isinstance(self.q_values, MutableMapping):
+                self.q_values[state] = new_table  # type: ignore[index]
 
     def materialize_tables(self) -> None:
         if self.uses_shared_backend():
             backend = self._shared_backend  # type: ignore[assignment]
             if backend is None:
                 return
-            raw_q, raw_visits = backend.export_tables()
+            raw_q = backend.export_tables()
             new_q = defaultdict(_state_q_factory)
             for state, actions in raw_q.items():
                 state_q = new_q[state]
                 for action_key, value in actions.items():
-                    try:
-                        move = self._decode_action(state, action_key)
-                    except ValueError:
-                        continue
-                    state_q[move] = value
-            new_visits = defaultdict(_state_visit_factory)
-            for state, actions in raw_visits.items():
-                state_visits = new_visits[state]
-                for action_key, count in actions.items():
-                    try:
-                        move = self._decode_action(state, action_key)
-                    except ValueError:
-                        continue
-                    state_visits[move] = count
+                    state_q[int(action_key)] = float(value)
             self.close_shared_backend(unlink=False)
-            self.configure_tables(new_q, new_visits, table_lock=None)
+            self.configure_tables(new_q, table_lock=None)
             return
 
         new_q = defaultdict(_state_q_factory)
         for state, actions in self._iter_mapping_items(self.q_values):
-            state_q = new_q[state]
-            state_q.update(dict(actions))
+            snapshot = self._snapshot_action_values(state, actions, mutate=False)
+            if snapshot:
+                new_q[state].update(snapshot)
 
-        new_visits = defaultdict(_state_visit_factory)
-        for state, actions in self._iter_mapping_items(self.visit_counts):
-            state_visits = new_visits[state]
-            state_visits.update(dict(actions))
-
-        self.configure_tables(new_q, new_visits, table_lock=None)
+        self.configure_tables(new_q, table_lock=None)
 
     def _set_state_q_values(self, state, actions: dict) -> None:
+        normalized = self._snapshot_action_values(state, actions, mutate=False)
         if self.uses_shared_backend():
             backend = self._shared_backend  # type: ignore[assignment]
             if backend is None:
                 return
-            for action, value in actions.items():
-                action_key = self._encode_action(state, action)
+            for action_key, value in normalized.items():
                 backend.set_q_value(state, action_key, value)
             return
         if isinstance(self.q_values, defaultdict):
-            self.q_values[state].update(actions)
+            self.q_values[state].update(normalized)
+        elif isinstance(self.q_values, MutableMapping):
+            self.q_values[state] = dict(normalized)  # type: ignore[index]
         elif isinstance(self.q_values, Mapping):
-            self.q_values[state] = dict(actions)  # type: ignore[index]
+            self.q_values[state] = dict(normalized)  # type: ignore[index]
 
-    def _set_state_visit_values(self, state, actions: dict) -> None:
-        if self.uses_shared_backend():
-            backend = self._shared_backend  # type: ignore[assignment]
-            if backend is None:
-                return
-            for action, count in actions.items():
-                action_key = self._encode_action(state, action)
-                backend.set_visit_count(state, action_key, count)
-            return
-        if isinstance(self.visit_counts, defaultdict):
-            self.visit_counts[state].update(actions)
-        elif isinstance(self.visit_counts, Mapping):
-            self.visit_counts[state] = dict(actions)  # type: ignore[index]

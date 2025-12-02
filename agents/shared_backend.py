@@ -35,7 +35,7 @@ class SharedSegment:
 
 
 class SharedActionValueBackend:
-    """Shared-memory Q/visit table with open addressing per state and fixed action slots."""
+    """Shared-memory Q-value table with open addressing per state and fixed action slots."""
 
     def __init__(
         self,
@@ -70,7 +70,6 @@ class SharedActionValueBackend:
                 "canonical": SharedSegment(f"{prefix}_can", (capacity, BOARD_CELLS), np.int8, 0),
                 "action_keys": SharedSegment(f"{prefix}_akey", (capacity, max_actions), np.int16, -1),
                 "q_values": SharedSegment(f"{prefix}_qval", (capacity, max_actions), np.float16, 0.0),
-                "visit_counts": SharedSegment(f"{prefix}_vct", (capacity, max_actions), np.int32, 0),
             }
             context["segments"] = {name: seg.name for name, seg in segments.items()}
             self._segments = {}
@@ -104,7 +103,6 @@ class SharedActionValueBackend:
         self.state_canonical = self._segments["canonical"][1]
         self.action_keys = self._segments["action_keys"][1]
         self.q_values = self._segments["q_values"][1]
-        self.visit_counts = self._segments["visit_counts"][1]
 
     def _segment_signature(self, key: str) -> tuple[np.dtype, tuple[int, ...]]:
         if key == "used":
@@ -123,8 +121,6 @@ class SharedActionValueBackend:
             return (np.int16, (self.capacity, self.max_actions))
         if key == "q_values":
             return (np.float16, (self.capacity, self.max_actions))
-        if key == "visit_counts":
-            return (np.int32, (self.capacity, self.max_actions))
         raise KeyError(key)
 
     @classmethod
@@ -150,7 +146,6 @@ class SharedActionValueBackend:
         per_action = (
             np.dtype(np.int16).itemsize  # action key
             + np.dtype(np.float16).itemsize  # q value
-            + np.dtype(np.int32).itemsize  # visit count
         )
         return base + per_action * max_actions
 
@@ -240,7 +235,6 @@ class SharedActionValueBackend:
                     self.state_action_count[idx] = 0
                     self.action_keys[idx].fill(-1)
                     self.q_values[idx].fill(0.0)
-                    self.visit_counts[idx].fill(0)
                     self.state_canonical[idx][:] = board_arr
                     return idx
             idx = (idx + 1) % self.capacity
@@ -319,16 +313,6 @@ class SharedActionValueBackend:
             self.q_values[idx, pos] = new_value
             return applied
 
-    def increment_visit_count(self, state: tuple[bytes, int, int], action_key: int, increment: int) -> int:
-        idx = self._ensure_state(state)
-        pos = self._ensure_action_slot(idx, action_key)
-        lock = self._lock_for(idx)
-        with lock:
-            prev = int(self.visit_counts[idx, pos])
-            new_count = prev + increment
-            self.visit_counts[idx, pos] = new_count
-            return new_count - prev
-
     def set_q_value(self, state: tuple[bytes, int, int], action_key: int, value: float) -> None:
         idx = self._ensure_state(state)
         pos = self._ensure_action_slot(idx, action_key)
@@ -336,36 +320,14 @@ class SharedActionValueBackend:
         with lock:
             self.q_values[idx, pos] = float(value)
 
-    def set_visit_count(self, state: tuple[bytes, int, int], action_key: int, count: int) -> None:
-        idx = self._ensure_state(state)
-        pos = self._ensure_action_slot(idx, action_key)
-        lock = self._lock_for(idx)
-        with lock:
-            self.visit_counts[idx, pos] = int(count)
-
-    def merge_q_value(self, state: tuple[bytes, int, int], action_key: int, value: float, visits: int) -> None:
-        idx = self._ensure_state(state)
-        pos = self._ensure_action_slot(idx, action_key)
-        lock = self._lock_for(idx)
-        with lock:
-            current_visits = int(self.visit_counts[idx, pos])
-            total = current_visits + visits
-            if total <= 0:
-                return
-            prev_q = float(self.q_values[idx, pos])
-            new_q = (prev_q * current_visits + value * visits) / total
-            self.q_values[idx, pos] = new_q
-            self.visit_counts[idx, pos] = total
-
     def estimate_memory_bytes(self) -> int:
         total = 0
         for shm, _ in self._segments.values():
             total += shm.size
         return total
 
-    def export_tables(self) -> tuple[Dict[tuple[bytes, int, int], Dict[int, float]], Dict[tuple[bytes, int, int], Dict[int, int]]]:
+    def export_tables(self) -> Dict[tuple[bytes, int, int], Dict[int, float]]:
         q_table: Dict[tuple[bytes, int, int], Dict[int, float]] = {}
-        visits_table: Dict[tuple[bytes, int, int], Dict[int, int]] = {}
         for idx in range(self.capacity):
             if not self.state_used[idx]:
                 continue
@@ -378,10 +340,8 @@ class SharedActionValueBackend:
                 continue
             action_keys = self.action_keys[idx, :count]
             q_vals = self.q_values[idx, :count]
-            v_counts = self.visit_counts[idx, :count]
             q_table[key] = {int(a): float(v) for a, v in zip(action_keys, q_vals) if a >= 0}
-            visits_table[key] = {int(a): int(v) for a, v in zip(action_keys, v_counts) if a >= 0}
-        return q_table, visits_table
+        return q_table
 
     def iter_states(self) -> Iterable[tuple[int, tuple[bytes, int, int]]]:
         for idx in range(self.capacity):
@@ -392,11 +352,10 @@ class SharedActionValueBackend:
             last_move = int(self.state_last_move[idx])
             yield idx, (board_bytes, player, last_move)
 
-    def get_state_action_data(self, idx: int) -> tuple[List[int], List[float], List[int]]:
+    def get_state_action_data(self, idx: int) -> tuple[List[int], List[float]]:
         count = int(self.state_action_count[idx])
         if count <= 0:
-            return [], [], []
+            return [], []
         keys = self.action_keys[idx, :count].tolist()
         qvals = self.q_values[idx, :count].tolist()
-        visits = self.visit_counts[idx, :count].tolist()
-        return keys, qvals, visits
+        return keys, qvals
