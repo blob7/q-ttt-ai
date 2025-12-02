@@ -72,7 +72,6 @@ class GameEnv:
         return self.get_state()
 
     def get_state(self):
-        """Return a tuple or flat version of the board (suitable for AI input)."""
         return self.game.board.copy(), self.game.current_player, self.game.last_move
     
     def get_state_hash(self):
@@ -218,88 +217,6 @@ class GameEnv:
         return None, safe_moves
 
 
-
-
-    # def opponent_can_win_next(self, move: tuple[int, int], player: int, opponent: int) -> bool:
-    #     """Return True if applying 'move' lets opponent win on their next move."""
-
-    #     # simulate our move once
-    #     board_backup = self.game.board
-    #     last_backup = self.game.last_move
-    #     player_backup = self.game.current_player
-
-    #     self.game.board = self._simulate_move(move, player)
-    #     self.game.last_move = move
-    #     self.game.current_player = opponent
-
-    #     opp_moves = self.get_valid_moves()
-
-    #     for opp_move in opp_moves:
-    #         winning_move = _cached_is_winning_move(
-    #             move=opp_move,
-    #             player=opponent,
-    #             board_bytes=self.game.board.tobytes(),
-    #             turn_count=self.game.turn_count + 1,
-    #             win_len=self.game.win_len,
-    #             game_size=self.game.SIZE
-    #         )
-    #         if winning_move:
-    #             # restore first
-    #             self.game.board = board_backup
-    #             self.game.last_move = last_backup
-    #             self.game.current_player = player_backup
-    #             return True
-
-    #     # restore
-    #     self.game.board = board_backup
-    #     self.game.last_move = last_backup
-    #     self.game.current_player = player_backup
-    #     return False
-
-    # def opponent_can_win_next(
-    #     self,
-    #     move: tuple[int, int],
-    #     player: int,
-    #     opponent: int
-    # ) -> bool:
-    #     """Return True if applying 'move' lets opponent immediately win next turn."""
-
-    #     board_backup = self.game.board
-    #     last_backup = self.game.last_move
-    #     player_backup = self.game.current_player
-
-    #     self.game.board = self._simulate_move(move, player)
-    #     self.game.last_move = move
-    #     self.game.current_player = opponent
-
-    #     opp_moves = self.get_valid_moves()
-    #     b = self.game.board
-
-    #     for om in opp_moves:
-    #         # For each line that contains this move
-    #         for line in LINES_BY_CELL[om]:
-    #             # Simulate opponent placing om
-    #             # We only modify one cell temporarily
-    #             if b[om] != 0:
-    #                 continue  # impossible but safe
-
-    #             # temporarily apply move
-    #             b[om] = opponent
-    #             if line_would_win(b, line, opponent):
-    #                 b[om] = 0
-    #                 self.game.board = board_backup
-    #                 self.game.last_move = last_backup
-    #                 self.game.current_player = player_backup
-    #                 return True
-    #             # undo
-    #             b[om] = 0
-
-    #     self.game.board = board_backup
-    #     self.game.last_move = last_backup
-    #     self.game.current_player = player_backup
-    #     return False
-
-
     def opponent_can_win_next(self, move: tuple[int,int], player: int, opponent: int) -> bool:
         """
         Return True if applying 'move' (by player) allows 'opponent' to immediately win next turn.
@@ -361,13 +278,6 @@ class GameEnv:
             self.game.current_player = current_backup
 
 
-
-    # def _simulate_move(self, move: tuple[int, int], player: int) -> np.ndarray:
-    #     """Return a copy of the board with the move applied."""
-    #     r, c = move
-    #     new_board = self.game.board.copy()
-    #     new_board[r, c] = player
-    #     return new_board
     
     def jump_to_move(self, index: int):
         """Set the game state to a specific move in history."""

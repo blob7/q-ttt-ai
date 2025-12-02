@@ -16,7 +16,7 @@ class PureRandomAgent(BaseAgent):
         return "PureRandomAgent"
 
     def choose_action(
-        self, env: GameEnv, learn: bool = True, *, use_safety_net: bool = True
+        self, env: GameEnv, learn: bool = True, *, use_safety_net: bool = False
     ):
         if use_safety_net:
             safety_move, safe_moves = env.safety_net_choices()

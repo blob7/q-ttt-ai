@@ -20,11 +20,14 @@ class GameLengthPlot:
             counts, _, _ = self.ax.hist(self.turns_list, bins=range(1, max(self.turns_list) + 2))
             max_count = int(max(counts)) if counts.size > 0 else 0
         self.ax.set_xlabel("Turns per Game")
-        self.ax.set_ylabel("Count")
+        self.ax.set_ylabel("Games Played")
         self.ax.set_title("Game Length Distribution")
         upper = max_count if max_count > 0 else 1
         self.ax.set_ylim(0, upper)
-        self.ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
+        if upper <= 10:
+            self.ax.yaxis.set_major_locator(ticker.MultipleLocator(1))
+        else:
+            self.ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=10, integer=True))
         self.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%d"))
 
     def _ensure_margin(self) -> None:

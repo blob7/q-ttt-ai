@@ -35,9 +35,9 @@ class PieceBreakdownPlot:
 
         # Clear previous plot
         self.ax.clear()
-        self.ax.set_xlabel("Count")
-        self.ax.set_ylabel("Outcome")
-        self.ax.set_title("Wins by Piece + Draws")
+        self.ax.set_xlabel("Games Won + Draws")
+        self.ax.set_ylabel("Result")
+        self.ax.set_title("Outcome by Piece Played")
 
         # Values and labels
         y_labels = [self.p1_name, self.p2_name, "Draws"]

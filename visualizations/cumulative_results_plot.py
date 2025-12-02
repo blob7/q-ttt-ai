@@ -42,9 +42,9 @@ class CumulativeResultPlot:
         self.ax.autoscale_view()
 
     def _display_labels(self, p1_wr: float, p2_wr: float):
-        self.ax.set_xlabel("Games")
-        self.ax.set_ylabel("Cumulative Count")
-        self.ax.set_title("Cumulative Results Over Time")
+        self.ax.set_xlabel("Games Played")
+        self.ax.set_ylabel("Total Wins or Draws")
+        self.ax.set_title("Match Progress: Wins and Draws Over Time.")
         if self.caption is None:
             self.caption = self.ax.text(
                 0.5, -0.2,
